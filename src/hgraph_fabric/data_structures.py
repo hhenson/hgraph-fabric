@@ -14,7 +14,7 @@ type DataRevisionKey = tuple[DataNamespace, DataRevisionId]
 type DataIdKey = tuple[DataNamespace, DataId]
 
 
-@dataclass
+@dataclass(frozen=True)
 class DataRevisionDetails:
     dependencies: tuple[DataVersionId, ...] | None
     weak_dependencies: tuple[DataVersionId, ...] | None
