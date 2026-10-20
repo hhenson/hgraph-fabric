@@ -141,6 +141,59 @@ class ConsistentCutTests(unittest.TestCase):
         )
         self.assertEqual(self.cache.get_latest_revision.call_args_list, [call(("y", 200))])
 
+    def test_contained_root_match_ignores_other_common_node_versions(self):
+        self.record("middle", 100, 0, (("a_source", 1),))
+        self.record("middle", 100, 7, (("a_source", 2),))
+        middle = self.subscription(("middle", 100, 0))
+        parent = self.subscription(self.record("parent", 200, dependencies=(("middle", 100),)))
+        # The parent expands middle's latest revision for version 100, while
+        # the subscription has an earlier count. Root versions already agree.
+        for left, right in ((middle, parent), (parent, middle)):
+            with self.subTest(left=left.data_id):
+                self.assertEqual(
+                    find_consistent_cut(left, right, self.cache),
+                    (left.current_revision, right.current_revision),
+                )
+        self.assertEqual(middle.current_revision, ("middle", 100, 0))
+
+    def test_newer_contained_root_is_resolved_directly(self):
+        historical = self.record("middle", 100, 7, (("a_source", 1),))
+        current = self.record("middle", 9000, 3, (("a_source", 3),))
+        middle = self.subscription(current)
+        parent = self.subscription(self.record("parent", 200, dependencies=(("middle", 100),)))
+        # a_source also differs (and sorts first), but only middle matters.
+        # No revision-zero header for middle=9000 is required by this shortcut.
+        self.assertEqual(
+            find_consistent_cut(middle, parent, self.cache),
+            (historical, parent.current_revision),
+        )
+        self.assertEqual(
+            find_consistent_cut(parent, middle, self.cache),
+            (parent.current_revision, historical),
+        )
+        self.assertNotIn(call(("middle", 9000, 0)), self.cache.get_revision.call_args_list)
+        self.assertEqual(middle.current_revision, current)
+
+    def test_downgraded_contained_root_only_constrains_its_own_version(self):
+        self.record("middle", 100, 0, (("a_source", 1),))
+        self.record("middle", 100, 7, (("a_source", 2),))
+        self.record("middle", 9000, 3, (("a_source", 3),))
+        self.record("parent", 200, 0, (("middle", 100),))
+        self.record("parent", 200, 1, (("middle", 9000),))
+        middle = self.subscription(("middle", 9000, 3))
+        middle.current_revision = ("middle", 100, 0)
+        parent = self.subscription(("parent", 200, 1))
+        self.assertEqual(
+            find_consistent_cut(middle, parent, self.cache),
+            (("middle", 100, 0), ("parent", 200, 0)),
+        )
+        self.assertEqual(
+            find_consistent_cut(parent, middle, self.cache),
+            (("parent", 200, 0), ("middle", 100, 0)),
+        )
+        self.assertEqual(middle.current_revision, ("middle", 100, 0))
+        self.assertEqual(parent.current_revision, ("parent", 200, 1))
+
     def test_two_leaves_of_same_id_only_adjust_the_leading_version(self):
         self.record("x", 100, 7)
         older = self.subscription(self.record("x", 100, 2))
