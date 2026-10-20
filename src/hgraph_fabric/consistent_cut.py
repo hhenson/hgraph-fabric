@@ -22,6 +22,9 @@ def find_consistent_cut(
     remains a dependency, its changes are recorded by both subscriptions;
     present dependency versions advance monotonically.
 
+    A leaf has only its root to compare. If it leads, resolve the consumed
+    version directly; if it lags, search the consuming tree for that one node.
+
     Prefer a revision matching all the original common nodes. Only if none
     exists may a revision omitting some of those nodes be used. Every common
     node at the proposed revision must still agree, including newly shared
@@ -36,26 +39,58 @@ def find_consistent_cut(
 
     left_revision, right_revision = left.current_revision, right.current_revision
     left_graph, right_graph = left.current(cache), right.current(cache)
-    left_nodes = _nodes(left_graph, left_revision)
-    right_nodes = _nodes(right_graph, right_revision)
 
-    # 1. Only shared IDs impose agreement. A stable order makes the choice of
-    #    the first mismatch reproducible; unrelated nodes need no alignment.
-    common = left_nodes.keys() & right_nodes.keys()
-    mismatch = _first_mismatch(left_nodes, right_nodes)
-    if mismatch is None:
-        return left_revision, right_revision
-
-    # 2. Fix the lagging graph as the target. Crossing below its version during
-    #    a probe is a lower bound, not a reason to move that fixed subscription.
-    if left_nodes[mismatch] > right_nodes[mismatch]:
-        leading, start = left, left_revision
-        fixed_nodes = right_nodes
-        leading_is_left = True
+    # An empty edge graph is a leaf subscription. Its root is the only possible
+    # shared node, so check that one ID directly instead of intersecting trees.
+    if not left_graph or not right_graph:
+        leaf_is_left = not left_graph
+        if not left_graph and not right_graph and left_revision[0] == right_revision[0]:
+            leaf_is_left = left_revision[1] >= right_revision[1]
+        leaf = left_revision if leaf_is_left else right_revision
+        other = right_revision if leaf_is_left else left_revision
+        other_graph = right_graph if leaf_is_left else left_graph
+        if leaf[0] == other[0]:
+            target = other[1]  # Also covers two leaf subscriptions of the same ID.
+        elif other_graph.has_data_id(leaf[0]):
+            target = other_graph.get_data_version_id(leaf[0])[1]
+        else:
+            return left_revision, right_revision
+        if leaf[1] == target:
+            return left_revision, right_revision
+        if leaf[1] > target:
+            # The other tree already identifies the required leaf version.
+            # Resolve its revision directly; there are no count bounds to bisect.
+            adjusted = cache.get_latest_revision((leaf[0], target))
+            return (adjusted, right_revision) if leaf_is_left else (left_revision, adjusted)
+        # The leaf lags. Keep it fixed and use the bounded search below to
+        # adjust the consuming tree, with just this one common node as target.
+        common = {leaf[0]}
+        mismatch = leaf[0]
+        fixed_nodes = {leaf[0]: leaf[1]}
+        leading_is_left = not leaf_is_left
+        leading = left if leading_is_left else right
+        start = other
     else:
-        leading, start = right, right_revision
-        fixed_nodes = left_nodes
-        leading_is_left = False
+        left_nodes = _nodes(left_graph, left_revision)
+        right_nodes = _nodes(right_graph, right_revision)
+
+        # 1. Only shared IDs impose agreement. A stable order makes the choice
+        #    of the first mismatch reproducible; unrelated nodes need no alignment.
+        common = left_nodes.keys() & right_nodes.keys()
+        mismatch = _first_mismatch(left_nodes, right_nodes)
+        if mismatch is None:
+            return left_revision, right_revision
+
+        # 2. Fix the lagging graph as the target. Crossing below its version
+        #    is a lower bound, not a reason to move that fixed subscription.
+        if left_nodes[mismatch] > right_nodes[mismatch]:
+            leading, start = left, left_revision
+            fixed_nodes = right_nodes
+            leading_is_left = True
+        else:
+            leading, start = right, right_revision
+            fixed_nodes = left_nodes
+            leading_is_left = False
     target = fixed_nodes[mismatch]
 
     def result(revision: DataRevisionId) -> tuple[DataRevisionId, DataRevisionId]:

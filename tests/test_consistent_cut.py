@@ -120,6 +120,42 @@ class ConsistentCutTests(unittest.TestCase):
         a = self.subscription(self.record("a", 100, 1, (("x", 2),)))
         x = self.subscription(("x", 1, 0))
         self.assertEqual(find_consistent_cut(a, x, self.cache), (("a", 100, 0), ("x", 1, 0)))
+        self.assertEqual(find_consistent_cut(x, a, self.cache), (("x", 1, 0), ("a", 100, 0)))
+
+    def test_leading_leaf_resolves_the_consumed_version_directly(self):
+        historical = self.record("x", 100, 7)
+        current = self.record("x", 9000, 3)
+        x = self.subscription(current)
+        a = self.subscription(self.record("a", 500, dependencies=(("x", 100),)))
+        # No revision-zero record for x=9000 is available or needed here.
+        self.assertEqual(find_consistent_cut(x, a, self.cache), (historical, a.current_revision))
+        self.assertEqual(find_consistent_cut(a, x, self.cache), (a.current_revision, historical))
+        self.assertNotIn(call(("x", 9000, 0)), self.cache.get_revision.call_args_list)
+        self.assertEqual(x.current_revision, current)
+
+    def test_unrelated_leaf_requires_no_adjustment(self):
+        x = self.subscription(self.record("x", 100))
+        a = self.subscription(self.record("a", 500, dependencies=(("y", 200),)))
+        self.assertEqual(
+            find_consistent_cut(x, a, self.cache), (x.current_revision, a.current_revision)
+        )
+        self.assertEqual(self.cache.get_latest_revision.call_args_list, [call(("y", 200))])
+
+    def test_two_leaves_of_same_id_only_adjust_the_leading_version(self):
+        self.record("x", 100, 7)
+        older = self.subscription(self.record("x", 100, 2))
+        newer = self.subscription(self.record("x", 9000, 3))
+        self.assertEqual(
+            find_consistent_cut(older, newer, self.cache), (("x", 100, 2), ("x", 100, 7))
+        )
+        self.assertEqual(
+            find_consistent_cut(newer, older, self.cache), (("x", 100, 7), ("x", 100, 2))
+        )
+        same_version = self.subscription(("x", 100, 7))
+        self.assertEqual(
+            find_consistent_cut(older, same_version, self.cache),
+            (("x", 100, 2), ("x", 100, 7)),
+        )
 
     def test_newly_common_node_is_checked_and_may_disappear(self):
         self.record("a", 100, 0, (("x", 0), ("y", 2)))
