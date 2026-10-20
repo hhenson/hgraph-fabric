@@ -18,7 +18,8 @@ class DataEdgeGraphTests(unittest.TestCase):
             incoming[target[0]].add(source[0])
         self.assertEqual(set(graph), expected)
         self.assertEqual(len(graph), len(expected))
-        self.assertEqual(graph._edges, versions)
+        self.assertEqual(graph._edges, expected)
+        self.assertEqual(graph._nodes, versions)
         self.assertEqual(graph._from_index, outgoing)
         self.assertEqual(graph._to_index, incoming)
 
