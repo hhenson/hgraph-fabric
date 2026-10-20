@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hgraph-fabric"
+version = "0.1.0.dev0"
+description = "Standalone development of the hgraph versioned dataflow fabric"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{name = "Howard Henson"}]
+dependencies = ["pyarrow"]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Programming Language :: Python :: 3",
+]
+
+[project.urls]
+Repository = "https://github.com/hhenson/hgraph-fabric"
+Issues = "https://github.com/hhenson/hgraph-fabric/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
