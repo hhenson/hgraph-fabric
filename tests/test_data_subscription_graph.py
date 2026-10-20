@@ -24,6 +24,56 @@ class DataSubscriptionGraphTests(unittest.TestCase):
         self.assertIs(subscription.revision(second_id, cache), second)
         self.assertEqual(cache.mock_calls, [])
 
+    def test_setting_current_prunes_older_versions_and_revisions(self):
+        subscription = DataSubscriptionGraph("prices")
+        cache = Mock(spec=DataCache)
+        cache.get_revision.return_value = DataRevisionDetails(None, None, None)
+        revision_ids = [
+            ("prices", 1, 99),
+            ("prices", 2, 1),
+            ("prices", 2, 3),
+            ("prices", 2, 5),
+            ("prices", 3, 1),
+        ]
+        graphs = {
+            revision_id: subscription.revision(revision_id, cache)
+            for revision_id in revision_ids
+        }
+        subscription.latest_revision = revision_ids[-1]
+        subscription.current_revision = ("prices", 2, 3)
+        self.assertEqual(subscription.current_revision, ("prices", 2, 3))
+        self.assertEqual(set(subscription._revision_graphs), set(revision_ids[2:]))
+        self.assertIs(subscription.current(), graphs[("prices", 2, 3)])
+        self.assertIs(subscription.latest(), graphs[revision_ids[-1]])
+        subscription.current_revision = revision_ids[-1]
+        self.assertEqual(subscription._revision_graphs, {
+            revision_ids[-1]: graphs[revision_ids[-1]],
+        })
+        self.assertIs(subscription.current(), graphs[revision_ids[-1]])
+
+    def test_clearing_current_retains_cached_graphs(self):
+        subscription = DataSubscriptionGraph("prices")
+        revision_id = ("prices", 1, 1)
+        graph = DataEdgeGraph()
+        subscription._revision_graphs[revision_id] = graph
+        subscription.current_revision = revision_id
+        subscription.current_revision = None
+        self.assertIsNone(subscription.current_revision)
+        self.assertEqual(subscription._revision_graphs, {revision_id: graph})
+        with self.assertRaises(LookupError):
+            subscription.current()
+
+    def test_foreign_current_revision_does_not_prune_or_change_selection(self):
+        subscription = DataSubscriptionGraph("prices")
+        revision_id = ("prices", 1, 1)
+        graph = DataEdgeGraph()
+        subscription._revision_graphs[revision_id] = graph
+        subscription.current_revision = revision_id
+        with self.assertRaises(ValueError):
+            subscription.current_revision = ("other", 9, 9)
+        self.assertEqual(subscription.current_revision, revision_id)
+        self.assertEqual(subscription._revision_graphs, {revision_id: graph})
+
     def test_unselected_and_unretained_revisions_raise_lookup_errors(self):
         subscription = DataSubscriptionGraph("prices")
         for accessor in (subscription.latest, subscription.current):

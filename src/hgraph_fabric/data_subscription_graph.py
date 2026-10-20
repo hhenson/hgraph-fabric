@@ -10,14 +10,29 @@ class DataSubscriptionGraph:
 
     data_id: DataId
     latest_revision: DataRevisionId | None
-    current_revision: DataRevisionId | None
+    _current_revision: DataRevisionId | None
     _revision_graphs: dict[DataRevisionId, DataEdgeGraph]
 
     def __init__(self, data_id: DataId) -> None:
         self.data_id = data_id
         self.latest_revision = None
-        self.current_revision = None
+        self._current_revision = None
         self._revision_graphs = {}
+
+    @property
+    def current_revision(self) -> DataRevisionId | None:
+        return self._current_revision
+
+    @current_revision.setter
+    def current_revision(self, revision_id: DataRevisionId | None) -> None:
+        """Select the current revision and discard older retained graphs."""
+        if revision_id is not None:
+            if revision_id[0] != self.data_id:
+                raise ValueError("Revision belongs to a different data ID")
+            for retained in list(self._revision_graphs):
+                if retained[1:] < revision_id[1:]:
+                    del self._revision_graphs[retained]
+        self._current_revision = revision_id
 
     def latest(self) -> DataEdgeGraph:
         if self.latest_revision is None:
