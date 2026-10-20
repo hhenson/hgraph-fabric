@@ -31,6 +31,19 @@ class DataEdgeGraph(MutableSet[DependencyEdge]):
     def __len__(self) -> int:
         return len(self._edges)
 
+    def has_node(self, node: DataVersionId) -> bool:
+        data_id, version = node
+        return data_id in self._nodes and self._nodes[data_id] == version
+
+    def nodes(self) -> Iterator[DataVersionId]:
+        return iter(self._nodes.items())
+
+    def has_data_id(self, data_id: DataId) -> bool:
+        return data_id in self._nodes
+
+    def data_ids(self) -> Iterator[DataId]:
+        return iter(self._nodes)
+
     def _check_version(self, value: DataVersionId) -> None:
         data_id, version = value
         if data_id in self._nodes and self._nodes[data_id] != version:
