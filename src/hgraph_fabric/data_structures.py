@@ -1,3 +1,6 @@
 type DataId = str
-type DataVersion = tuple[str, int]
-type DataRevision = tuple[str, int, int]
+type DataVersion = int
+type DataRevision = int
+
+type DataVersionId = tuple[DataId, DataVersion]
+type DataRevisionId = tuple[DataId, DataVersion, DataRevision]
