@@ -6,6 +6,7 @@ from .data_structures import (
     DataId,
     DataRevisionDetails,
     DataRevisionId,
+    DataUpdateDetails,
     DataVersionId,
     LatestDataDetails,
 )
@@ -24,4 +25,8 @@ class DataCache(ABC):
 
     @abstractmethod
     def get_revision(self, revision_id: DataRevisionId) -> DataRevisionDetails:
+        ...
+
+    @abstractmethod
+    def apply_update(self, update: DataUpdateDetails) -> None:
         ...
