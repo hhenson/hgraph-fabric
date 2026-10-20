@@ -9,8 +9,12 @@ accepted, including when its output is unchanged.
 
 ## Status
 
-This repository currently contains only the Python package scaffold.
-No fabric behaviour is implemented yet.
+The package currently provides identity aliases, frozen revision metadata,
+a lazy data cache with abstract storage loaders, and a directed dependency
+edge graph with version checks and node queries. The subscription graph
+interface retains revision graphs and selects latest/current graphs; building
+full dependency trees is deferred until version-to-revision lookup is defined.
+Concrete storage backends and end-to-end fabric execution are not implemented.
 
 We will build the components incrementally in Python to establish the structure
 and semantics. A later port to Rust or C++ remains an open decision. Integration
@@ -26,7 +30,7 @@ The existing implementation lives in
 [hgraph's fabric extension](https://github.com/hhenson/hgraph/tree/db55ea2c271bb39da7d597da14305155c4e82eca/extensions/fabric).
 Its [RFC 0026](https://github.com/hhenson/hgraph/blob/db55ea2c271bb39da7d597da14305155c4e82eca/docs/source/rfc/rfc_0026_versioned_dataflow_fabric.rst)
 provides the starting semantic reference. These links pin the source consulted
-when creating this project; they do not imply that this scaffold implements
+when creating this project; they do not imply that this package implements
 the RFC.
 
 This project has no dependency on hgraph. It uses the same distribution and
