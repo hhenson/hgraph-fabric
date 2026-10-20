@@ -34,15 +34,15 @@ class DataSubscriptionGraph:
                     del self._revision_graphs[retained]
         self._current_revision = revision_id
 
-    def latest(self) -> DataEdgeGraph:
+    def latest(self, cache: DataCache) -> DataEdgeGraph:
         if self.latest_revision is None:
             raise LookupError("No latest revision is selected")
-        return self._revision_graphs[self.latest_revision]
+        return self.revision(self.latest_revision, cache)
 
-    def current(self) -> DataEdgeGraph:
+    def current(self, cache: DataCache) -> DataEdgeGraph:
         if self.current_revision is None:
             raise LookupError("No current revision is selected")
-        return self._revision_graphs[self.current_revision]
+        return self.revision(self.current_revision, cache)
 
     def revision(
         self, revision_id: DataRevisionId, cache: DataCache
