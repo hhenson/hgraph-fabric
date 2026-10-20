@@ -20,8 +20,16 @@ or `add_subscriptions(data_ids)`, loading their latest trees. Its
 `get_consistent_cut()` returns a `set[DataVersionId]` for compatible subscribed
 roots. It initializes every current selection to latest, runs round-robin
 comparisons using `find_consistent_cut`, and applies each returned revision pair.
-Rounds repeat until no selection changes, so later adjustments are checked
-against earlier pairs. A failed comparison restores the pre-tournament selections.
+When a selection changes, its other comparisons are queued again, so later
+adjustments are checked against earlier pairs. A failed comparison restores
+the pre-tournament selections.
+
+`apply_update(update)` always updates the cache. Only an update for a subscribed
+data ID changes that subscription's latest revision and triggers recalculation.
+With an established cut, it tries to advance subscriptions currently behind
+latest and compares only affected pairs. Waiting peers can advance together;
+if a proposal would regress any selection, the previous cut is retained.
+Before an initial cut exists, it runs the full tournament.
 
 The pairwise search keeps the lagging subscription fixed, follows revision-zero
 links across sparse versions, and binary-searches counts within one version.
