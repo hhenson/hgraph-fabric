@@ -48,6 +48,19 @@ class DataEdgeGraphTests(unittest.TestCase):
         self.assertEqual(list(graph.nodes()), [])
         self.assertEqual(list(graph.data_ids()), [])
 
+    def test_get_data_version_id_tracks_current_nodes(self):
+        graph = DataEdgeGraph([AB, BC])
+        self.assertEqual(graph.get_data_version_id("a"), ("a", 1))
+        self.assertEqual(graph.get_data_version_id("b"), ("b", 2))
+        with self.assertRaises(KeyError):
+            graph.get_data_version_id("missing")
+        graph.remove(AB)
+        with self.assertRaises(KeyError):
+            graph.get_data_version_id("a")
+        self.assertEqual(graph.get_data_version_id("b"), ("b", 2))
+        graph.add((("a", 9), ("b", 2)))
+        self.assertEqual(graph.get_data_version_id("a"), ("a", 9))
+
     def test_membership_and_iteration_are_over_directed_edges(self):
         graph = DataEdgeGraph([AB, BC])
         graph.add(AB)

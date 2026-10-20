@@ -44,6 +44,9 @@ class DataEdgeGraph(MutableSet[DependencyEdge]):
     def data_ids(self) -> Iterator[DataId]:
         return iter(self._nodes)
 
+    def get_data_version_id(self, data_id: DataId) -> DataVersionId:
+        return data_id, self._nodes[data_id]
+
     def successors(self, data_id: DataId) -> Iterator[DataId]:
         """Return targets of edges from data_id; raise KeyError if it is unknown."""
         return iter(self._from_index[data_id])
