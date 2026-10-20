@@ -24,3 +24,8 @@ class DataRevisionDetails:
 class LatestDataDetails:
     revision_id: DataRevisionId
     previous_revision_id: DataRevisionId | None
+
+
+@dataclass(frozen=True)
+class DataUpdateDetails(LatestDataDetails, DataRevisionDetails):
+    pass
