@@ -1,6 +1,11 @@
+type DataNamespace = str
 type DataId = str
 type DataVersion = int
 type DataRevision = int
 
 type DataVersionId = tuple[DataId, DataVersion]
 type DataRevisionId = tuple[DataId, DataVersion, DataRevision]
+
+type DataVersionKey = tuple[DataNamespace, DataVersionId]
+type DataRevisionKey = tuple[DataNamespace, DataRevisionId]
+type DataIdKey = tuple[DataNamespace, DataId]
