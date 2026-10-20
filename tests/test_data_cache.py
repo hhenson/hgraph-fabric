@@ -16,6 +16,7 @@ class MemoryDataCache(DataCache):
         self.latest_values = {}
         self.data_values = {}
         self.revision_values = {}
+        self.latest_revision_values = {}
         self.loads = []
 
     def load_latest(self, data_id):
@@ -29,6 +30,10 @@ class MemoryDataCache(DataCache):
     def load_revision(self, revision_id):
         self.loads.append(("revision", revision_id))
         return self.revision_values[revision_id]
+
+    def load_latest_revision(self, version_id):
+        self.loads.append(("latest_revision", version_id))
+        return self.latest_revision_values[version_id]
 
 
 class DataCacheTests(unittest.TestCase):
@@ -93,6 +98,9 @@ class DataCacheTests(unittest.TestCase):
                 weak_dependencies=(("reference", revision),),
             )
             self.cache.apply_update(update)
+            self.assertEqual(
+                self.cache.get_latest_revision(("prices", 1)), update.revision_id
+            )
             self.assertEqual(self.cache.latest("prices").revision_id, update.revision_id)
             self.assertEqual(
                 self.cache.get_revision(update.revision_id).weak_dependencies,
@@ -108,6 +116,8 @@ class DataCacheTests(unittest.TestCase):
              table({"price": [30]}), "data"),
             (self.cache.get_revision, self.cache.revision_values, ("other", 1, 1),
              DataRevisionDetails(None, None), "revision"),
+            (self.cache.get_latest_revision, self.cache.latest_revision_values,
+             ("other", 1), ("other", 1, 3), "latest_revision"),
         ):
             with self.subTest(resource=kind):
                 with self.assertRaises(KeyError):
@@ -116,6 +126,39 @@ class DataCacheTests(unittest.TestCase):
                 self.assertIs(getter(key), value)
                 self.assertIs(getter(key), value)
                 self.assertEqual(self.cache.loads.count((kind, key)), 2)
+
+    def test_latest_revision_lookup_is_scoped_to_version_and_cached(self):
+        self.cache.latest_revision_values.update({
+            ("prices", 1): ("prices", 1, 3),
+            ("prices", 2): ("prices", 2, 5),
+        })
+        for version, revision in ((1, 3), (2, 5)):
+            for _ in range(2):
+                self.assertEqual(
+                    self.cache.get_latest_revision(("prices", version)),
+                    ("prices", version, revision),
+                )
+        self.assertEqual(self.cache.loads, [
+            ("latest_revision", ("prices", 1)),
+            ("latest_revision", ("prices", 2)),
+        ])
+        self.cache.apply_update(DataUpdateDetails(
+            revision_id=("prices", 2, 6),
+            previous_revision_id=("prices", 2, 5),
+            dependencies=None,
+            weak_dependencies=None,
+        ))
+        self.assertEqual(self.cache.get_latest_revision(("prices", 2)), ("prices", 2, 6))
+        self.assertEqual(self.cache.get_latest_revision(("prices", 1)), ("prices", 1, 3))
+        self.assertEqual(len(self.cache.loads), 2)
+
+    def test_latest_revision_rejects_mismatched_version_without_caching(self):
+        self.cache.latest_revision_values[("prices", 1)] = ("prices", 2, 5)
+        with self.assertRaises(ValueError):
+            self.cache.get_latest_revision(("prices", 1))
+        self.cache.latest_revision_values[("prices", 1)] = ("prices", 1, 3)
+        self.assertEqual(self.cache.get_latest_revision(("prices", 1)), ("prices", 1, 3))
+        self.assertEqual(len(self.cache.loads), 2)
 
     def test_cache_instances_are_independent(self):
         other = MemoryDataCache()

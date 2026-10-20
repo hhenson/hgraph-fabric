@@ -12,8 +12,9 @@ accepted, including when its output is unchanged.
 The package currently provides identity aliases, frozen revision metadata,
 a lazy data cache with abstract storage loaders, and a directed dependency
 edge graph with version checks and node queries. The subscription graph
-interface retains revision graphs and selects latest/current graphs; building
-full dependency trees is deferred until version-to-revision lookup is defined.
+builds and retains full strong-dependency graphs breadth first, using the cache's
+latest-revision lookup for each specific dependency version. Latest/current
+revision selection is explicit; weak dependencies are excluded.
 Concrete storage backends and end-to-end fabric execution are not implemented.
 
 We will build the components incrementally in Python to establish the structure

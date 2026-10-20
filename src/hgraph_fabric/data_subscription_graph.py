@@ -1,14 +1,12 @@
+from collections import deque
+
 from .data_cache import DataCache
 from .data_graph import DataEdgeGraph
 from .data_structures import DataId, DataRevisionId
 
 
 class DataSubscriptionGraph:
-    """Retain full strong-dependency trees for one subscribed data ID.
-
-    Weak dependencies are excluded. Tree construction is deferred until the
-    cache provides a version-to-revision lookup.
-    """
+    """Retain full strong-dependency trees for one subscribed data ID."""
 
     data_id: DataId
     latest_revision: DataRevisionId | None
@@ -38,6 +36,17 @@ class DataSubscriptionGraph:
             raise ValueError("Revision belongs to a different data ID")
         if revision_id in self._revision_graphs:
             return self._revision_graphs[revision_id]
-        raise NotImplementedError(
-            "Building dependency trees requires a version-to-revision lookup"
-        )
+        graph = DataEdgeGraph()
+        pending = deque([revision_id])
+        queued = {revision_id[:2]}
+        while pending:
+            current = pending.popleft()
+            details = cache.get_revision(current)
+            for dependency in details.dependencies or ():
+                graph.add((current[:2], dependency))
+                if dependency not in queued:
+                    pending.append(cache.get_latest_revision(dependency))
+                    queued.add(dependency)
+
+        self._revision_graphs[revision_id] = graph
+        return graph
