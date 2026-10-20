@@ -1,6 +1,7 @@
 import unittest
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
+from hgraph_fabric.consistent_cut import find_consistent_cut
 from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_structures import DataRevisionDetails
 from hgraph_fabric.data_subscription_manager import DataSubscriptionManager
@@ -70,24 +71,25 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         for subscription in self.manager._subscriptions.values():
             self.assertEqual(subscription.current_revision, subscription.latest_revision)
 
-    def test_merge_walk_alternates_histories_until_all_three_agree(self):
+    def test_tournament_aligns_complete_histories_in_either_registration_order(self):
         for version in (1, 2, 3):
             self.add_revision("source", version)
-        for data_id, source_version in (("a", 3), ("b", 2), ("c", 2)):
-            self.add_revision(data_id, 1, dependencies=(("source", 1),))
-            self.add_revision(
-                data_id, 2, dependencies=(("source", source_version),), previous=(1, 0)
-            )
+        for data_id, latest_version in (("a", 3), ("b", 2), ("c", 2)):
+            for version in range(1, latest_version + 1):
+                self.add_revision(
+                    data_id, version, dependencies=(("source", version),),
+                    previous=(version - 1, 0) if version > 1 else None,
+                )
         for order in (["a", "b", "c"], ["c", "b", "a"]):
             with self.subTest(order=order):
                 manager = DataSubscriptionManager(self.cache)
                 manager.add_subscriptions(order)
                 self.assertEqual(
-                    manager.get_consistent_cut(), {("a", 1), ("b", 1), ("c", 1)}
+                    manager.get_consistent_cut(), {("a", 2), ("b", 2), ("c", 2)}
                 )
                 for subscription in manager._subscriptions.values():
-                    self.assertEqual(subscription.current_revision[1:], (1, 0))
-                    self.assertEqual(subscription.latest_revision[1:], (2, 0))
+                    self.assertEqual(subscription.current_revision[1:], (2, 0))
+                self.assertEqual(manager._subscriptions["a"].latest_revision, ("a", 3, 0))
 
     def test_walks_revision_counts_within_same_version(self):
         self.add_revision("source", 1)
@@ -147,30 +149,68 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         self.assertEqual(a.current_revision, ("a", 2, 0))
         self.assertIsNone(b.current_revision)
 
-    def test_steps_other_tree_when_dependency_was_absent_in_older_revision(self):
-        self.add_revision("source", 1)
-        self.add_revision("source", 2)
-        self.add_revision("a", 10, dependencies=(("source", 2),))
-        self.add_revision("b", 10)
-        self.add_revision("b", 30, dependencies=(("source", 1),), previous=(10, 0))
-        self.manager.add_subscriptions(["a", "b"])
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 10), ("b", 10)})
+    def test_later_comparison_revisits_an_earlier_pair(self):
+        for data_id in ("x", "y"):
+            for version in (1, 2):
+                self.add_revision(data_id, version)
+        for count, (x, y) in enumerate(((1, 1), (1, 2), (2, 2))):
+            self.add_revision("a", 100, count, (("x", x), ("y", y)))
+        self.add_revision("b", 100, 0, (("x", 1),))
+        self.add_revision("b", 100, 1, (("x", 2),))
+        self.add_revision("c", 100, 0, (("y", 1),))
+        self.manager.add_subscriptions(["a", "b", "c"])
+        # a/b initially agree on x=2. Matching a/c rolls a back to x=1,y=1,
+        # invalidating a/b; b/c have no overlap and cannot repair that pair.
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 100), ("b", 100), ("c", 100)})
+        for data_id, subscription in self.manager._subscriptions.items():
+            self.assertEqual(subscription.current_revision, (data_id, 100, 0))
 
-    def test_backtracks_when_changing_dependencies_make_merge_path_a_dead_end(self):
-        self.add_revision("x", 1)
-        self.add_revision("x", 2)
-        self.add_revision("z", 1)
-        self.add_revision("z", 2)
-        self.add_revision("a", 10, dependencies=(("x", 2), ("z", 1)))
-        self.add_revision(
-            "a", 30, dependencies=(("x", 2), ("z", 2)), previous=(10, 0)
-        )
-        self.add_revision("b", 10, dependencies=(("z", 2),))
-        self.add_revision("b", 30, dependencies=(("x", 1),), previous=(10, 0))
-        self.manager.add_subscriptions(["a", "b"])
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 30), ("b", 10)})
+    def test_every_run_initializes_all_currents_before_comparing(self):
+        self.add_revision("source", 1)
+        for data_id in ("a", "b", "c"):
+            self.add_revision(data_id, 100, dependencies=(("source", 1),))
+        self.manager.add_subscriptions(["a", "b", "c"])
+        for subscription in self.manager._subscriptions.values():
+            subscription.current_revision = (subscription.data_id, 1, 0)
+
+        def compare(left, right, cache):
+            for subscription in self.manager._subscriptions.values():
+                self.assertEqual(subscription.current_revision, subscription.latest_revision)
+            return find_consistent_cut(left, right, cache)
+
+        with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
+            self.assertEqual(self.manager.get_consistent_cut(), {("a", 100), ("b", 100), ("c", 100)})
+
+    def test_single_subscription_is_reset_to_latest(self):
+        self.add_revision("a", 100)
+        subscription = self.manager.add_subscription("a")
+        subscription.current_revision = ("a", 1, 0)
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 100)})
+        self.assertEqual(subscription.current_revision, ("a", 100, 0))
+
+    def test_failed_later_comparison_restores_pre_tournament_selections(self):
+        for version in (1, 2):
+            self.add_revision("x", version)
+        self.add_revision("a", 100, 0, (("x", 1),))
+        self.add_revision("a", 100, 1, (("x", 2),))
+        self.add_revision("b", 100, dependencies=(("x", 1),))
+        self.add_revision("c", 100)
+        self.manager.add_subscriptions(["a", "b", "c"])
+        a = self.manager._subscriptions["a"]
+        a.current_revision = ("a", 100, 1)
+        previous = {key: sub.current_revision for key, sub in self.manager._subscriptions.items()}
+
+        def compare(left, right, cache):
+            if right.data_id == "c":
+                self.assertEqual(a.current_revision, ("a", 100, 0))
+                raise OSError("Unavailable history")
+            return find_consistent_cut(left, right, cache)
+
+        with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
+            with self.assertRaises(OSError):
+                self.manager.get_consistent_cut()
         self.assertEqual(
-            self.manager._subscriptions["a"].current_revision, ("a", 30, 0)
+            {key: sub.current_revision for key, sub in self.manager._subscriptions.items()}, previous
         )
 
     def test_rejects_history_that_does_not_move_to_an_older_version(self):

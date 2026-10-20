@@ -18,15 +18,17 @@ revision selection is explicit; weak dependencies are excluded.
 `DataSubscriptionManager(cache)` registers roots with `add_subscription(data_id)`
 or `add_subscriptions(data_ids)`, loading their latest trees. Its
 `get_consistent_cut()` returns a `set[DataVersionId]` for compatible subscribed
-roots and selects their current revisions together. The search compares shared
-nodes, including leaf roots, and searches the newer conflicting history first.
-It indexes the history through revision-zero links, so version numbers may have
-gaps, then uses bounded binary search to prefer exact dependency-version matches.
-Present dependency versions must be monotonic. An absent dependency does not
-exclude either search range, because dependencies can disappear and reappear.
-Only after exact candidates fail does the search try revisions without that
-dependency, newest first, retaining other candidates for backtracking.
-If no cut exists, it raises `LookupError` without changing current selections.
+roots. It initializes every current selection to latest, runs round-robin
+comparisons using `find_consistent_cut`, and applies each returned revision pair.
+Rounds repeat until no selection changes, so later adjustments are checked
+against earlier pairs. A failed comparison restores the pre-tournament selections.
+
+The pairwise search keeps the lagging subscription fixed, follows revision-zero
+links across sparse versions, and binary-searches counts within one version.
+If one subscription's root occurs in the other tree, only that root version
+needs to match; otherwise all common nodes are checked. Subscriptions record
+dependency changes while those dependencies remain present. Exact matches
+take priority over missing-dependency candidates.
 Concrete storage backends and end-to-end fabric execution are not implemented.
 
 The cache's `latest(data_id)` returns a revision ID. Historical version lookup
