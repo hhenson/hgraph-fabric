@@ -58,6 +58,29 @@ class DataEdgeGraphTests(unittest.TestCase):
             with self.subTest(value=absent):
                 self.assertNotIn(absent, graph)
 
+    def test_directional_data_id_queries_follow_edge_changes(self):
+        graph = DataEdgeGraph([AB, BC, AC])
+        self.assertEqual(set(graph.from_data_ids("a")), {"b", "c"})
+        self.assertEqual(set(graph.to_data_ids("c")), {"a", "b"})
+        self.assertEqual(set(graph.from_data_ids("b")), {"c"})
+        self.assertEqual(set(graph.to_data_ids("b")), {"a"})
+        self.assertEqual(list(graph.to_data_ids("a")), [])
+        self.assertEqual(list(graph.from_data_ids("c")), [])
+        graph.remove(AC)
+        self.assertEqual(set(graph.from_data_ids("a")), {"b"})
+        self.assertEqual(set(graph.to_data_ids("c")), {"b"})
+        self_edge = (("b", 2), ("b", 2))
+        graph.add(self_edge)
+        self.assertEqual(set(graph.from_data_ids("b")), {"b", "c"})
+        self.assertEqual(set(graph.to_data_ids("b")), {"a", "b"})
+        graph.remove(self_edge)
+        graph.remove(AB)
+        for query in (graph.from_data_ids, graph.to_data_ids):
+            for missing in ("a", "unknown"):
+                with self.subTest(query=query.__name__, data_id=missing):
+                    with self.assertRaises(KeyError):
+                        query(missing)
+
     def test_remove_and_discard_edges(self):
         graph = DataEdgeGraph([AB, BC])
         graph.discard(AC)
