@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from itertools import chain
 
 from .data_cache import DataCache
@@ -28,10 +28,10 @@ class DataSubscriptionManager:
     def get_consistent_cut(self) -> set[DataVersionId]:
         """Select compatible root versions by walking newer histories backwards.
 
-        Prefer stepping the newer conflicting tree, but retain the other path
-        because dependencies can appear or disappear. Return the subscribed
-        roots, committing current selections only after agreement. Raise
-        LookupError if the histories cannot be aligned.
+        Prefer exact dependency matches to revisions without the dependency.
+        Search the newer conflicting tree first, retaining alternative paths
+        for changing dependencies. Commit current selections only after
+        agreement; raise LookupError if the histories cannot be aligned.
         """
         candidates: dict[DataId, DataRevisionId] = {}
         for data_id, subscription in self._subscriptions.items():
@@ -39,17 +39,15 @@ class DataSubscriptionManager:
                 raise LookupError(f"No latest revision is selected for {data_id!r}")
             candidates[data_id] = subscription.latest_revision
 
-        pending: list[tuple[dict[DataId, DataRevisionId], DataId | None]] = [
-            (candidates, None)
+        pending: list[Iterator[dict[DataId, DataRevisionId]]] = [
+            iter([candidates])
         ]
         visited: set[tuple[DataRevisionId, ...]] = set()
         while pending:
-            candidates, step = pending.pop()
-            if step is not None:
-                previous = self._previous_revision(candidates[step])
-                if previous is None:
-                    continue
-                candidates = {**candidates, step: previous}
+            candidates = next(pending[-1], None)
+            if candidates is None:
+                pending.pop()
+                continue
             state = tuple(candidates.values())
             if state in visited:
                 continue
@@ -77,10 +75,79 @@ class DataSubscriptionManager:
                     self._subscriptions[data_id].current_revision = revision_id
                 return {revision_id[:2] for revision_id in candidates.values()}
 
-            # Try the merge direction first; defer loading the alternative.
-            pending.append((candidates, older))
-            pending.append((candidates, newer))
+            # Defer both searches until needed; try the newer tree first.
+            pending.append(self._replacements(
+                candidates, older, (node_id, max(version, other_version))
+            ))
+            pending.append(self._replacements(
+                candidates, newer, (node_id, min(version, other_version))
+            ))
         raise LookupError("No consistent cut exists in the subscription histories")
+
+    def _replacements(
+        self,
+        candidates: dict[DataId, DataRevisionId],
+        data_id: DataId,
+        dependency: DataVersionId,
+    ) -> Iterator[dict[DataId, DataRevisionId]]:
+        for revision_id in self._ordered_revisions(candidates[data_id], dependency):
+            yield {**candidates, data_id: revision_id}
+
+    def _ordered_revisions(
+        self, revision_id: DataRevisionId, dependency: DataVersionId
+    ) -> Iterator[DataRevisionId]:
+        """Search exact matches first, then absent dependencies, newest first."""
+        # Index actual history before bisecting: version numbers may have gaps.
+        history = []
+        previous = self._previous_revision(revision_id)
+        while previous is not None:
+            history.append(previous)
+            previous = self._previous_revision(previous)
+
+        subscription = self._subscriptions[revision_id[0]]
+        node_id, target = dependency
+        versions: dict[int, DataVersion | None] = {}
+
+        def version_at(index: int) -> DataVersion | None:
+            if index not in versions:
+                candidate = history[index]
+                if candidate[0] == node_id:
+                    versions[index] = candidate[1]
+                else:
+                    graph = subscription.revision(candidate, self._cache)
+                    versions[index] = (
+                        graph.get_data_version_id(node_id)[1]
+                        if graph.has_data_id(node_id) else None
+                    )
+            return versions[index]
+
+        def matches(low: int, high: int) -> Iterator[int]:
+            if low >= high:
+                return
+            mid = (low + high) // 2
+            version = version_at(mid)
+            # Present versions are monotonic. Absence cannot exclude either
+            # range: the dependency may have disappeared and reappeared.
+            if version is None or version <= target:
+                yield from matches(low, mid)
+            if version == target:
+                yield mid
+            if version is None or version >= target:
+                yield from matches(mid + 1, high)
+
+        yielded = set()
+        for index in matches(0, len(history)):
+            yielded.add(index)
+            yield history[index]
+        # A missing dependency wins only after exact candidates are exhausted.
+        for index, candidate in enumerate(history):
+            if index not in yielded and version_at(index) is None:
+                yielded.add(index)
+                yield candidate
+        # Retain other bounds for backtracking when both roots must move.
+        for index, candidate in enumerate(history):
+            if index not in yielded:
+                yield candidate
 
     def _previous_revision(self, revision_id: DataRevisionId) -> DataRevisionId | None:
         data_id, version, count = revision_id

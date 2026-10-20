@@ -19,9 +19,13 @@ revision selection is explicit; weak dependencies are excluded.
 or `add_subscriptions(data_ids)`, loading their latest trees. Its
 `get_consistent_cut()` returns a `set[DataVersionId]` for compatible subscribed
 roots and selects their current revisions together. The search compares shared
-nodes, including leaf roots, and walks the newer conflicting history backwards
-first. It can backtrack to the other history when dependencies appear or disappear.
-Version changes follow revision-zero links, so version numbers may have gaps.
+nodes, including leaf roots, and searches the newer conflicting history first.
+It indexes the history through revision-zero links, so version numbers may have
+gaps, then uses bounded binary search to prefer exact dependency-version matches.
+Present dependency versions must be monotonic. An absent dependency does not
+exclude either search range, because dependencies can disappear and reappear.
+Only after exact candidates fail does the search try revisions without that
+dependency, newest first, retaining other candidates for backtracking.
 If no cut exists, it raises `LookupError` without changing current selections.
 Concrete storage backends and end-to-end fabric execution are not implemented.
 
