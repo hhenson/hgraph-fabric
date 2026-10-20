@@ -61,8 +61,9 @@ class DataCacheTests(unittest.TestCase):
         old_revision = self.cache.get_revision(("prices", 1, 1))
         self.cache.loads.clear()
         update = DataUpdateDetails(
-            revision_id=("prices", 2, 2),
-            previous_revision_id=old_latest,
+            id="prices",
+            revision=(2, 2),
+            previous_revision=old_latest[1:],
             dependencies=(("source", 3),),
             weak_dependencies=None,
         )
@@ -73,7 +74,7 @@ class DataCacheTests(unittest.TestCase):
         )
         self.assertEqual(
             self.cache.get_revision(("prices", 2, 2)),
-            DataRevisionDetails((("source", 3),), None, ("prices", 1, 1)),
+            DataRevisionDetails((("source", 3),), None, (1, 1)),
         )
         self.assertIs(self.cache.get_data(("prices", 1)), old_data)
         self.assertIs(self.cache.get_revision(("prices", 1, 1)), old_revision)
@@ -87,19 +88,40 @@ class DataCacheTests(unittest.TestCase):
     def test_update_seeds_empty_cache_and_same_version_revision(self):
         for revision in (1, 2):
             update = DataUpdateDetails(
-                revision_id=("prices", 1, revision),
-                previous_revision_id=("prices", 1, 1) if revision == 2 else None,
+                id="prices",
+                revision=(1, revision),
+                previous_revision=(1, 1) if revision == 2 else None,
                 dependencies=None,
                 weak_dependencies=(("reference", revision),),
             )
             self.cache.apply_update(update)
+            revision_id = ("prices", 1, revision)
             self.assertEqual(
-                self.cache.get_latest_revision(("prices", 1)), update.revision_id
+                self.cache.get_latest_revision(("prices", 1)), revision_id
             )
-            self.assertEqual(self.cache.latest("prices"), update.revision_id)
+            self.assertEqual(self.cache.latest("prices"), revision_id)
             self.assertEqual(
-                self.cache.get_revision(update.revision_id).weak_dependencies,
+                self.cache.get_revision(revision_id).weak_dependencies,
                 update.weak_dependencies,
+            )
+        self.assertEqual(self.cache.loads, [])
+
+    def test_updates_with_equal_revision_pairs_keep_data_ids_separate(self):
+        for data_id, dependency in (("prices", "source"), ("quotes", "reference")):
+            self.cache.apply_update(DataUpdateDetails(
+                id=data_id,
+                revision=(2, 3),
+                previous_revision=(1, 2),
+                dependencies=((dependency, 1),),
+                weak_dependencies=None,
+            ))
+        for data_id, dependency in (("prices", "source"), ("quotes", "reference")):
+            revision_id = (data_id, 2, 3)
+            self.assertEqual(self.cache.latest(data_id), revision_id)
+            self.assertEqual(self.cache.get_latest_revision((data_id, 2)), revision_id)
+            self.assertEqual(
+                self.cache.get_revision(revision_id),
+                DataRevisionDetails(((dependency, 1),), None, (1, 2)),
             )
         self.assertEqual(self.cache.loads, [])
 
@@ -123,8 +145,8 @@ class DataCacheTests(unittest.TestCase):
     def test_latest_revision_lookup_is_scoped_to_version_and_cached(self):
         self.cache.latest_values["prices"] = ("prices", 3, 8)
         self.cache.revision_values.update({
-            ("prices", 3, 0): DataRevisionDetails(None, None, ("prices", 2, 5)),
-            ("prices", 2, 0): DataRevisionDetails(None, None, ("prices", 1, 3)),
+            ("prices", 3, 0): DataRevisionDetails(None, None, (2, 5)),
+            ("prices", 2, 0): DataRevisionDetails(None, None, (1, 3)),
         })
         for version, revision in ((3, 8), (2, 5), (1, 3)):
             for _ in range(2):
@@ -138,8 +160,9 @@ class DataCacheTests(unittest.TestCase):
             ("revision", ("prices", 2, 0)),
         ])
         self.cache.apply_update(DataUpdateDetails(
-            revision_id=("prices", 3, 9),
-            previous_revision_id=("prices", 3, 8),
+            id="prices",
+            revision=(3, 9),
+            previous_revision=(3, 8),
             dependencies=None,
             weak_dependencies=None,
         ))
@@ -150,7 +173,7 @@ class DataCacheTests(unittest.TestCase):
     def test_version_lookup_raises_when_chain_ends_before_requested_version(self):
         self.cache.latest_values["prices"] = ("prices", 3, 8)
         self.cache.revision_values[("prices", 3, 0)] = DataRevisionDetails(
-            None, None, ("prices", 1, 3)
+            None, None, (1, 3)
         )
         self.cache.revision_values[("prices", 1, 0)] = DataRevisionDetails(None, None, None)
         for version in (2, 9):
@@ -166,18 +189,21 @@ class DataCacheTests(unittest.TestCase):
             self.cache.get_latest_revision(("prices", 1))
         self.assertNotIn(("prices", 1), self.cache._latest_revisions)
         self.cache.revision_values[("prices", 2, 0)] = DataRevisionDetails(
-            None, None, ("prices", 1, 3)
+            None, None, (1, 3)
         )
         self.assertEqual(self.cache.get_latest_revision(("prices", 1)), ("prices", 1, 3))
         self.assertEqual(self.cache.loads.count(("revision", ("prices", 2, 0))), 2)
 
-    def test_version_lookup_rejects_cross_data_links_and_cycles(self):
-        for previous in (("other", 1, 3), ("prices", 2, 4)):
+    def test_version_lookup_rejects_cycles(self):
+        for previous in ((2, 4), (3, 6)):
             with self.subTest(previous=previous):
                 cache = MemoryDataCache()
                 cache.latest_values["prices"] = ("prices", 2, 5)
                 cache.revision_values[("prices", 2, 0)] = DataRevisionDetails(
                     None, None, previous
+                )
+                cache.revision_values[("prices", 3, 0)] = DataRevisionDetails(
+                    None, None, (2, 5)
                 )
                 with self.assertRaises(ValueError):
                     cache.get_latest_revision(("prices", 1))
@@ -187,7 +213,7 @@ class DataCacheTests(unittest.TestCase):
         self.cache.latest_values.update({"source": ("source", 2, 8), "leaf": ("leaf", 7, 4)})
         self.cache.revision_values.update({
             ("prices", 1, 1): DataRevisionDetails((("source", 1),), None, None),
-            ("source", 2, 0): DataRevisionDetails(None, None, ("source", 1, 3)),
+            ("source", 2, 0): DataRevisionDetails(None, None, (1, 3)),
             ("source", 1, 3): DataRevisionDetails((("leaf", 7),), None, None),
             ("leaf", 7, 4): DataRevisionDetails(None, None, None),
         })

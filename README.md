@@ -18,8 +18,9 @@ revision selection is explicit; weak dependencies are excluded.
 Concrete storage backends and end-to-end fabric execution are not implemented.
 
 The cache's `latest(data_id)` returns a revision ID. Historical version lookup
-starts there and follows `previous_revision_id` from each version's revision-0
-record. That pointer identifies the previous version and its maximum revision;
+starts there and follows the `(version, revision_count)` pair in
+`previous_revision` from each version's revision-0 record, retaining the same
+data ID. That pair identifies the previous version and its maximum revision;
 `None` marks the end of the chain.
 
 We will build the components incrementally in Python to establish the structure

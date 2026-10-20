@@ -51,20 +51,25 @@ class DataCache(ABC):
                     raise ValueError("Cyclic version history")
                 visited.add(revision_id[:2])
                 header = self.get_revision((data_id, revision_id[1], 0))
-                revision_id = header.previous_revision_id
+                revision_id = (
+                    (data_id, *header.previous_revision)
+                    if header.previous_revision is not None
+                    else None
+                )
             else:
                 raise KeyError(version_id)
         return self._latest_revisions[version_id]
 
     def apply_update(self, update: DataUpdateDetails) -> None:
         """Accept the supplied update as latest and cache its revision metadata."""
-        self._latest[update.revision_id[0]] = update.revision_id
-        self._revisions[update.revision_id] = DataRevisionDetails(
+        revision_id = (update.id, *update.revision)
+        self._latest[update.id] = revision_id
+        self._revisions[revision_id] = DataRevisionDetails(
             dependencies=update.dependencies,
             weak_dependencies=update.weak_dependencies,
-            previous_revision_id=update.previous_revision_id,
+            previous_revision=update.previous_revision,
         )
-        self._latest_revisions[update.revision_id[:2]] = update.revision_id
+        self._latest_revisions[revision_id[:2]] = revision_id
 
     @abstractmethod
     def load_latest(self, data_id: DataId) -> DataRevisionId:
