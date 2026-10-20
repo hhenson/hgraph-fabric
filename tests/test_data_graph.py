@@ -58,24 +58,24 @@ class DataEdgeGraphTests(unittest.TestCase):
             with self.subTest(value=absent):
                 self.assertNotIn(absent, graph)
 
-    def test_directional_data_id_queries_follow_edge_changes(self):
+    def test_predecessors_and_successors_follow_edge_changes(self):
         graph = DataEdgeGraph([AB, BC, AC])
-        self.assertEqual(set(graph.from_data_ids("a")), {"b", "c"})
-        self.assertEqual(set(graph.to_data_ids("c")), {"a", "b"})
-        self.assertEqual(set(graph.from_data_ids("b")), {"c"})
-        self.assertEqual(set(graph.to_data_ids("b")), {"a"})
-        self.assertEqual(list(graph.to_data_ids("a")), [])
-        self.assertEqual(list(graph.from_data_ids("c")), [])
+        self.assertEqual(set(graph.successors("a")), {"b", "c"})
+        self.assertEqual(set(graph.predecessors("c")), {"a", "b"})
+        self.assertEqual(set(graph.successors("b")), {"c"})
+        self.assertEqual(set(graph.predecessors("b")), {"a"})
+        self.assertEqual(list(graph.predecessors("a")), [])
+        self.assertEqual(list(graph.successors("c")), [])
         graph.remove(AC)
-        self.assertEqual(set(graph.from_data_ids("a")), {"b"})
-        self.assertEqual(set(graph.to_data_ids("c")), {"b"})
+        self.assertEqual(set(graph.successors("a")), {"b"})
+        self.assertEqual(set(graph.predecessors("c")), {"b"})
         self_edge = (("b", 2), ("b", 2))
         graph.add(self_edge)
-        self.assertEqual(set(graph.from_data_ids("b")), {"b", "c"})
-        self.assertEqual(set(graph.to_data_ids("b")), {"a", "b"})
+        self.assertEqual(set(graph.successors("b")), {"b", "c"})
+        self.assertEqual(set(graph.predecessors("b")), {"a", "b"})
         graph.remove(self_edge)
         graph.remove(AB)
-        for query in (graph.from_data_ids, graph.to_data_ids):
+        for query in (graph.successors, graph.predecessors):
             for missing in ("a", "unknown"):
                 with self.subTest(query=query.__name__, data_id=missing):
                     with self.assertRaises(KeyError):

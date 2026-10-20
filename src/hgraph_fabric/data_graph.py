@@ -44,11 +44,11 @@ class DataEdgeGraph(MutableSet[DependencyEdge]):
     def data_ids(self) -> Iterator[DataId]:
         return iter(self._nodes)
 
-    def from_data_ids(self, data_id: DataId) -> Iterator[DataId]:
+    def successors(self, data_id: DataId) -> Iterator[DataId]:
         """Return targets of edges from data_id; raise KeyError if it is unknown."""
         return iter(self._from_index[data_id])
 
-    def to_data_ids(self, data_id: DataId) -> Iterator[DataId]:
+    def predecessors(self, data_id: DataId) -> Iterator[DataId]:
         """Return sources of edges to data_id; raise KeyError if it is unknown."""
         return iter(self._to_index[data_id])
 
