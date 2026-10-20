@@ -1,4 +1,5 @@
 from collections.abc import Iterable, Iterator, MutableSet
+from typing import Self
 
 from .data_structures import DataId, DataVersion, DataVersionId, DependencyEdge
 
@@ -30,6 +31,13 @@ class DataEdgeGraph(MutableSet[DependencyEdge]):
 
     def __len__(self) -> int:
         return len(self._edges)
+
+    def __ixor__(self, other: Iterable[DependencyEdge]) -> Self:
+        values = set(other)
+        additions = values - self._edges
+        self -= values
+        self |= additions
+        return self
 
     def has_node(self, node: DataVersionId) -> bool:
         data_id, version = node

@@ -162,6 +162,16 @@ class DataEdgeGraphTests(unittest.TestCase):
         graph.clear()
         self.assert_indexes(graph, set())
 
+    def test_symmetric_difference_removes_old_versions_before_adding_new_ones(self):
+        replacement = (("a", 9), ("b", 2))
+        for values in ({AB, replacement}, [replacement, AB], [AB, replacement]):
+            with self.subTest(values=values):
+                graph = DataEdgeGraph([AB, BC])
+                graph ^= values
+                self.assert_indexes(graph, {replacement, BC})
+                graph ^= graph
+                self.assert_indexes(graph, set())
+
     def test_graph_instances_are_independent(self):
         graph = DataEdgeGraph([AB])
         other = DataEdgeGraph()
