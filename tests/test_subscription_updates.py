@@ -43,7 +43,7 @@ class SubscriptionUpdateTests(unittest.TestCase):
         a, b = self.seed_pair()
         graph = a.current(self.cache)
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut") as compare:
-            self.manager.apply_update(self.update("x", 2, previous=(1, 0)))
+            self.assertEqual(self.manager.apply_update(self.update("x", 2, previous=(1, 0))), set())
         compare.assert_not_called()
         self.assertEqual(self.cache.latest("x"), ("x", 2, 0))
         self.assertEqual(self.cache.get_revision(("x", 2, 0)).previous_revision, (1, 0))
@@ -56,7 +56,10 @@ class SubscriptionUpdateTests(unittest.TestCase):
         self.cache.apply_update(self.update("a", 100))
         self.cache.apply_update(self.update("b", 100))
         self.manager.add_subscriptions(["a", "b"])
-        self.manager.apply_update(self.update("a", 200, previous=(100, 0)))
+        self.assertEqual(
+            self.manager.apply_update(self.update("a", 200, previous=(100, 0))),
+            {("a", 200), ("b", 100)},
+        )
         self.assertEqual(self.cache.latest("a"), ("a", 200, 0))
         self.assertEqual(self.manager._subscriptions["a"].latest_revision, ("a", 200, 0))
         self.assertEqual(self.manager._subscriptions["a"].current_revision, ("a", 200, 0))
@@ -64,13 +67,19 @@ class SubscriptionUpdateTests(unittest.TestCase):
 
     def test_blocked_update_waits_then_peer_update_unlocks_both(self):
         a, b = self.seed_pair()
-        self.manager.apply_update(self.update("x", 2, previous=(1, 0)))
-        self.manager.apply_update(self.update("a", 200, dependencies=(("x", 2),), previous=(100, 0)))
+        self.assertEqual(self.manager.apply_update(self.update("x", 2, previous=(1, 0))), set())
+        self.assertEqual(
+            self.manager.apply_update(self.update("a", 200, dependencies=(("x", 2),), previous=(100, 0))),
+            set(),
+        )
         self.assertEqual(a.latest_revision, ("a", 200, 0))
         self.assertEqual(a.current_revision, ("a", 100, 0))
         self.assertEqual(b.current_revision, ("b", 100, 0))
 
-        self.manager.apply_update(self.update("b", 200, dependencies=(("x", 2),), previous=(100, 0)))
+        self.assertEqual(
+            self.manager.apply_update(self.update("b", 200, dependencies=(("x", 2),), previous=(100, 0))),
+            {("a", 200), ("b", 200)},
+        )
         self.assertEqual(a.current_revision, ("a", 200, 0))
         self.assertEqual(b.current_revision, ("b", 200, 0))
         self.assertEqual(self.cache.latest("a"), a.latest_revision)
@@ -86,7 +95,10 @@ class SubscriptionUpdateTests(unittest.TestCase):
             "hgraph_fabric.data_subscription_manager.find_consistent_cut",
             wraps=find_consistent_cut,
         ) as compare:
-            self.manager.apply_update(self.update("a", 100, 1, dependencies=(("x", 1),)))
+            self.assertEqual(
+                self.manager.apply_update(self.update("a", 100, 1, dependencies=(("x", 1),))),
+                set(),
+            )
         self.assertEqual(
             {frozenset((args[0].data_id, args[1].data_id)) for args, _ in compare.call_args_list},
             {frozenset(("a", other)) for other in ("b", "c", "d")},
@@ -101,8 +113,8 @@ class SubscriptionUpdateTests(unittest.TestCase):
         self.manager.get_consistent_cut()
         update = self.update("a", 200, previous=(100, 0))
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut") as compare:
-            self.manager.apply_update(update)
-            self.manager.apply_update(update)
+            self.assertEqual(self.manager.apply_update(update), {("a", 200)})
+            self.assertEqual(self.manager.apply_update(update), set())
         compare.assert_not_called()
         self.assertEqual(a.current_revision, ("a", 200, 0))
         self.assertEqual(a.latest_revision, ("a", 200, 0))
@@ -117,8 +129,8 @@ class SubscriptionUpdateTests(unittest.TestCase):
         self.assertEqual(self.cache.latest("a"), ("a", 200, 0))
         self.assertEqual(a.current_revision, ("a", 100, 0))
         self.assertEqual(b.current_revision, ("b", 100, 0))
-        self.manager.apply_update(self.update("missing", 1))
-        self.manager.apply_update(update)
+        self.assertEqual(self.manager.apply_update(self.update("missing", 1)), set())
+        self.assertEqual(self.manager.apply_update(update), {("a", 200)})
         self.assertEqual(a.current_revision, ("a", 200, 0))
         self.assertEqual(b.current_revision, ("b", 100, 0))
 
@@ -135,7 +147,10 @@ class SubscriptionUpdateTests(unittest.TestCase):
             "hgraph_fabric.data_subscription_manager.find_consistent_cut",
             return_value=(("a", 100, 0), ("b", 100, 0)),
         ):
-            self.manager.apply_update(self.update("a", 200, previous=(100, 1)))
+            self.assertEqual(
+                self.manager.apply_update(self.update("a", 200, previous=(100, 1))),
+                set(),
+            )
         self.assertEqual(a.latest_revision, ("a", 200, 0))
         self.assertEqual(a.current_revision, ("a", 100, 1))
         self.assertEqual(b.current_revision, ("b", 100, 0))

@@ -27,12 +27,12 @@ class DataSubscriptionManager:
         for data_id in data_ids:
             self.add_subscription(data_id)
 
-    def apply_update(self, update: DataUpdateDetails) -> None:
-        """Cache every update; reconsider the cut only for a subscribed root."""
+    def apply_update(self, update: DataUpdateDetails) -> set[DataVersionId]:
+        """Cache an update and return newly available subscription data versions."""
         self._cache.apply_update(update)
         subscription = self._subscriptions.get(update.id)
         if subscription is None:
-            return
+            return set()
         subscription.latest_revision = (update.id, *update.revision)
 
         current = {key: sub.current_revision for key, sub in self._subscriptions.items()}
@@ -40,16 +40,23 @@ class DataSubscriptionManager:
             # New subscriptions (or externally changed selections) need an
             # initial complete tournament before we can reuse a validated cut.
             self.get_consistent_cut()
-            return
+        else:
+            # Try every root held behind latest: this update may unlock peers that
+            # could not advance previously. Roots already at latest remain fixed.
+            candidates = {
+                key for key, sub in self._subscriptions.items()
+                if sub.latest_revision is not None and sub.current_revision < sub.latest_revision
+            }
+            if candidates:
+                self._run_tournament(candidates)
 
-        # Try every root held behind latest: this update may unlock peers that
-        # could not advance previously. Roots already at latest remain fixed.
-        candidates = {
-            key for key, sub in self._subscriptions.items()
-            if sub.latest_revision is not None and sub.current_revision < sub.latest_revision
+        # Report the final selections, including peers unlocked by this update.
+        # A higher revision count alone does not represent new data.
+        return {
+            sub.current_revision[:2]
+            for key, sub in self._subscriptions.items()
+            if current[key] is None or sub.current_revision[1] > current[key][1]
         }
-        if candidates:
-            self._run_tournament(candidates)
 
     def get_consistent_cut(self) -> set[DataVersionId]:
         """Initialize all roots to latest and run a complete pairwise tournament."""

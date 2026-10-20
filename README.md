@@ -30,6 +30,9 @@ With an established cut, it tries to advance subscriptions currently behind
 latest and compares only affected pairs. Waiting peers can advance together;
 if a proposal would regress any selection, the previous cut is retained.
 Before an initial cut exists, it runs the full tournament.
+It returns the `set[DataVersionId]` of subscriptions whose current data version
+advanced, including newly selected subscriptions and waiting peers. Revision
+count changes alone do not indicate new data and are excluded.
 
 The pairwise search keeps the lagging subscription fixed, follows revision-zero
 links across sparse versions, and binary-searches counts within one version.
