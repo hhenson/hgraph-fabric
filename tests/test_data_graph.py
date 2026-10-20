@@ -47,15 +47,6 @@ class DataEdgeGraphTests(unittest.TestCase):
         graph.discard(BC)
         self.assert_indexes(graph, set())
 
-    def test_edge_helpers_use_the_same_set_operations(self):
-        graph = DataEdgeGraph()
-        graph.add_edge(AB)
-        self.assert_indexes(graph, {AB})
-        graph.remove_edge(AB)
-        self.assert_indexes(graph, set())
-        with self.assertRaises(KeyError):
-            graph.remove_edge(AB)
-
     def test_conflicts_do_not_partially_mutate_graph(self):
         graph = DataEdgeGraph([AB])
         for edge in (

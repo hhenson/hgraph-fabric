@@ -67,9 +67,3 @@ class DataEdgeGraph(MutableSet[DependencyEdge]):
         if edge not in self:
             raise KeyError(edge)
         self.discard(edge)
-
-    def add_edge(self, edge: DependencyEdge) -> None:
-        self.add(edge)
-
-    def remove_edge(self, edge: DependencyEdge) -> None:
-        self.remove(edge)
