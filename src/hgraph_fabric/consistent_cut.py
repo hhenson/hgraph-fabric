@@ -13,6 +13,10 @@ def find_consistent_cut(
 ) -> tuple[DataRevisionId, DataRevisionId]:
     """Return consistent (left revision, right revision), in argument order.
 
+    Start from each subscription's current_revision. The caller initializes
+    current to latest before a tournament and applies returned pairs between
+    comparisons; this function never resets a selection to latest.
+
     The first mismatching common node chooses the leading subscription.
     The other subscription stays fixed throughout the search. While a node
     remains a dependency, its changes are recorded by both subscriptions;
@@ -27,11 +31,11 @@ def find_consistent_cut(
     latest_revision nor current_revision is changed; the caller can apply the
     returned revisions after reviewing or combining the result.
     """
-    if left.latest_revision is None or right.latest_revision is None:
-        raise LookupError("Both subscriptions need a latest revision")
+    if left.current_revision is None or right.current_revision is None:
+        raise LookupError("Both subscriptions need a current revision")
 
-    left_revision, right_revision = left.latest_revision, right.latest_revision
-    left_graph, right_graph = left.latest(cache), right.latest(cache)
+    left_revision, right_revision = left.current_revision, right.current_revision
+    left_graph, right_graph = left.current(cache), right.current(cache)
     left_nodes = _nodes(left_graph, left_revision)
     right_nodes = _nodes(right_graph, right_revision)
 
@@ -88,7 +92,8 @@ def find_consistent_cut(
             return leading.data_id, version, middle
         return exact_revision(version, low, middle - 1)
 
-    # 3. Establish bounds using each version's maximum count and revision zero.
+    # 3. The selected current count is the initial upper bound, even if newer
+    #    revisions exist. Establish bounds using that count and revision zero.
     #    If zero still leads, walk its previous_revision pointer. That pointer
     #    supplies BOTH the actual previous version and its maximum count.
     #    Never decrement a version number or bisect across different versions.

@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import Mock, call
+from unittest.mock import Mock, call, patch
 
 from hgraph_fabric.consistent_cut import find_consistent_cut
 from hgraph_fabric.data_cache import DataCache
@@ -26,14 +26,15 @@ class ConsistentCutTests(unittest.TestCase):
     def subscription(self, revision):
         subscription = DataSubscriptionGraph(revision[0])
         subscription.latest_revision = revision
+        subscription.current_revision = revision
         return subscription
 
-    def test_compatible_latest_trees_return_the_original_revision_pair(self):
+    def test_compatible_current_trees_return_the_original_revision_pair(self):
         a = self.subscription(self.record("a", 10, dependencies=(("x", 7),)))
         b = self.subscription(self.record("b", 20, dependencies=(("x", 7),)))
         self.assertEqual(find_consistent_cut(a, b, self.cache), (("a", 10, 0), ("b", 20, 0)))
-        self.assertIsNone(a.current_revision)
-        self.assertIsNone(b.current_revision)
+        self.assertEqual(a.current_revision, a.latest_revision)
+        self.assertEqual(b.current_revision, b.latest_revision)
 
     def test_disjoint_leaf_roots_need_no_history_search(self):
         a = self.subscription(self.record("a", 10))
@@ -63,8 +64,8 @@ class ConsistentCutTests(unittest.TestCase):
                              if revision[1] == 9000))
         self.assertTrue(all(revision[1] in (1000, 9000) for revision in a_loads))
         self.assertEqual(b.latest_revision, expected[1])
-        self.assertIsNone(a.current_revision)
-        self.assertIsNone(b.current_revision)
+        self.assertEqual(a.current_revision, a.latest_revision)
+        self.assertEqual(b.current_revision, b.latest_revision)
 
     def test_matching_first_node_can_require_moving_forward_for_another(self):
         # At count 1, x matches but y lags. Search forward inside the same
@@ -149,8 +150,48 @@ class ConsistentCutTests(unittest.TestCase):
         self.assertLessEqual(len(loads), 12)
 
     def test_missing_selection_raises(self):
-        with self.assertRaises(LookupError):
-            find_consistent_cut(
-                DataSubscriptionGraph("a"), DataSubscriptionGraph("b"), self.cache
-            )
+        a = self.subscription(self.record("a", 100))
+        b = self.subscription(self.record("b", 200))
+        for missing in (a, b):
+            with self.subTest(missing=missing.data_id):
+                missing.current_revision = None
+                with self.assertRaises(LookupError):
+                    find_consistent_cut(a, b, self.cache)
+                missing.current_revision = missing.latest_revision
         self.assertEqual(self.cache.mock_calls, [])
+
+    def test_current_selection_is_used_even_when_latest_is_a_newer_version(self):
+        a = self.subscription(self.record("a", 100, dependencies=(("x", 1),)))
+        b = self.subscription(self.record("b", 200, dependencies=(("x", 1),)))
+        a.latest_revision = ("a", 9000, 5)
+        b.latest_revision = ("b", 8000, 7)
+        expected = (a.current_revision, b.current_revision)
+        # The newer records are deliberately unavailable. They are not inputs
+        # to this comparison and must not be loaded or selected.
+        self.assertEqual(find_consistent_cut(a, b, self.cache), expected)
+        self.assertEqual((a.current_revision, b.current_revision), expected)
+        self.assertEqual(a.latest_revision, ("a", 9000, 5))
+        self.assertEqual(b.latest_revision, ("b", 8000, 7))
+
+    def test_next_comparison_keeps_the_previous_rounds_revision_count_bound(self):
+        for count in range(6):
+            self.record("a", 100, count, (("x", count),))
+        a = self.subscription(("a", 100, 5))
+        b = self.subscription(self.record("b", 200, dependencies=(("x", 3),)))
+        first = find_consistent_cut(a, b, self.cache)
+        self.assertEqual(first, (("a", 100, 3), ("b", 200, 0)))
+        a.current_revision, b.current_revision = first
+
+        c = self.subscription(self.record("c", 300, dependencies=(("x", 1),)))
+        c.latest_revision = ("c", 9000, 0)
+        self.cache.reset_mock()
+        with patch.object(a, "revision", wraps=a.revision) as revisions:
+            second = find_consistent_cut(a, c, self.cache)
+        self.assertEqual(second, (("a", 100, 1), ("c", 300, 0)))
+        self.assertEqual(a.current_revision, first[0])
+        self.assertEqual(a.latest_revision, ("a", 100, 5))
+        self.assertEqual(c.current_revision, ("c", 300, 0))
+        # Even already cached newer graphs must not be considered again.
+        self.assertTrue(all(
+            args[0][2] <= 3 for args, _ in revisions.call_args_list
+        ))
