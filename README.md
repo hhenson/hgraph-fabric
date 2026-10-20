@@ -17,6 +17,11 @@ latest-revision lookup for each specific dependency version. Latest/current
 revision selection is explicit; weak dependencies are excluded.
 Concrete storage backends and end-to-end fabric execution are not implemented.
 
+The cache's `latest(data_id)` returns a revision ID. Historical version lookup
+starts there and follows `previous_revision_id` from each version's revision-0
+record. That pointer identifies the previous version and its maximum revision;
+`None` marks the end of the chain.
+
 We will build the components incrementally in Python to establish the structure
 and semantics. A later port to Rust or C++ remains an open decision. Integration
 with hgraph will follow once the standalone components are established.

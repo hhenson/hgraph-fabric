@@ -17,8 +17,11 @@ type DataIdKey = tuple[DataNamespace, DataId]
 
 @dataclass(frozen=True)
 class DataRevisionDetails:
+    """Revision metadata; revision 0 links to the previous version's maximum revision."""
+
     dependencies: tuple[DataVersionId, ...] | None
     weak_dependencies: tuple[DataVersionId, ...] | None
+    previous_revision_id: DataRevisionId | None
 
 
 @dataclass(frozen=True)

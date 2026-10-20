@@ -8,7 +8,6 @@ from .data_structures import (
     DataRevisionId,
     DataUpdateDetails,
     DataVersionId,
-    LatestDataDetails,
 )
 
 
@@ -16,12 +15,12 @@ class DataCache(ABC):
     """Cache data resources and metadata, loading each missing key on demand."""
 
     def __init__(self) -> None:
-        self._latest: dict[DataId, LatestDataDetails] = {}
+        self._latest: dict[DataId, DataRevisionId] = {}
         self._data: dict[DataVersionId, Table] = {}
         self._revisions: dict[DataRevisionId, DataRevisionDetails] = {}
         self._latest_revisions: dict[DataVersionId, DataRevisionId] = {}
 
-    def latest(self, data_id: DataId) -> LatestDataDetails:
+    def latest(self, data_id: DataId) -> DataRevisionId:
         if data_id not in self._latest:
             self._latest[data_id] = self.load_latest(data_id)
         return self._latest[data_id]
@@ -37,28 +36,38 @@ class DataCache(ABC):
         return self._revisions[revision_id]
 
     def get_latest_revision(self, version_id: DataVersionId) -> DataRevisionId:
-        """Return the latest revision of this specific data version."""
+        """Walk revision-0 previous-version links from the latest revision."""
         if version_id not in self._latest_revisions:
-            revision_id = self.load_latest_revision(version_id)
-            if revision_id[:2] != version_id:
-                raise ValueError("Loaded revision belongs to a different data version")
-            self._latest_revisions[version_id] = revision_id
+            data_id, _ = version_id
+            revision_id = self.latest(data_id)
+            visited = set()
+            while revision_id is not None:
+                if revision_id[0] != data_id:
+                    raise ValueError("Version history points to a different data ID")
+                if revision_id[:2] == version_id:
+                    self._latest_revisions[version_id] = revision_id
+                    break
+                if revision_id[:2] in visited:
+                    raise ValueError("Cyclic version history")
+                visited.add(revision_id[:2])
+                header = self.get_revision((data_id, revision_id[1], 0))
+                revision_id = header.previous_revision_id
+            else:
+                raise KeyError(version_id)
         return self._latest_revisions[version_id]
 
     def apply_update(self, update: DataUpdateDetails) -> None:
         """Accept the supplied update as latest and cache its revision metadata."""
-        self._latest[update.revision_id[0]] = LatestDataDetails(
-            revision_id=update.revision_id,
-            previous_revision_id=update.previous_revision_id,
-        )
+        self._latest[update.revision_id[0]] = update.revision_id
         self._revisions[update.revision_id] = DataRevisionDetails(
             dependencies=update.dependencies,
             weak_dependencies=update.weak_dependencies,
+            previous_revision_id=update.previous_revision_id,
         )
         self._latest_revisions[update.revision_id[:2]] = update.revision_id
 
     @abstractmethod
-    def load_latest(self, data_id: DataId) -> LatestDataDetails:
+    def load_latest(self, data_id: DataId) -> DataRevisionId:
         ...
 
     @abstractmethod
@@ -67,8 +76,4 @@ class DataCache(ABC):
 
     @abstractmethod
     def load_revision(self, revision_id: DataRevisionId) -> DataRevisionDetails:
-        ...
-
-    @abstractmethod
-    def load_latest_revision(self, version_id: DataVersionId) -> DataRevisionId:
         ...

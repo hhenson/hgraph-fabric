@@ -10,8 +10,9 @@ from hgraph_fabric.data_structures import (
 
 class DataDetailsTests(unittest.TestCase):
     def test_nullable_fields(self):
-        self.assertIsNone(DataRevisionDetails(None, None).dependencies)
-        self.assertIsNone(DataRevisionDetails(None, None).weak_dependencies)
+        self.assertIsNone(DataRevisionDetails(None, None, None).dependencies)
+        self.assertIsNone(DataRevisionDetails(None, None, None).weak_dependencies)
+        self.assertIsNone(DataRevisionDetails(None, None, None).previous_revision_id)
         self.assertIsNone(LatestDataDetails(("prices", 1, 1), None).previous_revision_id)
 
     def test_update_combines_revision_and_dependency_details(self):
@@ -30,7 +31,7 @@ class DataDetailsTests(unittest.TestCase):
 
     def test_details_are_frozen(self):
         instances = (
-            DataRevisionDetails(None, None),
+            DataRevisionDetails(None, None, None),
             LatestDataDetails(("prices", 1, 1), None),
             DataUpdateDetails(
                 revision_id=("prices", 1, 1),
