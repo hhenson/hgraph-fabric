@@ -8,6 +8,7 @@ type DataRevision = int
 
 type DataVersionId = tuple[DataId, DataVersion]
 type DataRevisionId = tuple[DataId, DataVersion, DataRevision]
+type DependencyEdge = tuple[DataVersionId, DataVersionId]
 
 type DataVersionKey = tuple[DataNamespace, DataVersionId]
 type DataRevisionKey = tuple[DataNamespace, DataRevisionId]
