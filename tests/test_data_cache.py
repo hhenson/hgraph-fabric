@@ -23,7 +23,7 @@ class MemoryDataCache(DataCache):
         self.loads.append(("latest", data_id))
         return self.latest_values[data_id]
 
-    def load_data(self, version_id):
+    def load_version(self, version_id):
         self.loads.append(("data", version_id))
         return self.data_values[version_id]
 

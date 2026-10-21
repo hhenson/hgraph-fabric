@@ -29,7 +29,7 @@ class DataCache(ABC):
 
     def get_data(self, version_id: DataVersionId) -> Table:
         if version_id not in self._data:
-            self._data[version_id] = self.load_data(version_id)
+            self._data[version_id] = self.load_version(version_id)
         return self._data[version_id]
 
     def get_revision(self, revision_id: DataRevisionId) -> DataRevisionDetails:
@@ -139,7 +139,7 @@ class DataCache(ABC):
         ...
 
     @abstractmethod
-    def load_data(self, version_id: DataVersionId) -> Table:
+    def load_version(self, version_id: DataVersionId) -> Table:
         ...
 
     @abstractmethod

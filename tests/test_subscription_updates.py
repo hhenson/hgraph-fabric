@@ -16,7 +16,7 @@ class UpdateOnlyCache(DataCache):
     def load_revision(self, revision_id):
         raise KeyError(revision_id)
 
-    def load_data(self, version_id):
+    def load_version(self, version_id):
         raise KeyError(version_id)
 
     def write_version(self, version_id, data):

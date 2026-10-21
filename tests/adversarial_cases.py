@@ -89,7 +89,7 @@ class HistoryCache(DataCache):
         self.loads.append(("revision", revision))
         return self.history.records[revision]
 
-    def load_data(self, version):
+    def load_version(self, version):
         raise AssertionError("Metadata search must not load dataframe payloads")
 
     def write_version(self, version_id, data):
