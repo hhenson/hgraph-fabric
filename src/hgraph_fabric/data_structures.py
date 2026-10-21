@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 
 
 type DataNamespace = str
@@ -25,6 +26,7 @@ class DataRevisionDetails:
     dependencies: tuple[DataVersionId, ...] | None
     weak_dependencies: tuple[DataVersionId, ...] | None
     previous_revision: DataRevision | None
+    as_of: datetime
 
 
 @dataclass(frozen=True)

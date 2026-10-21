@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from enum import Enum, auto
 
 from .data_cache import DataCache
 from .data_graph import DataEdgeGraph
@@ -6,10 +7,22 @@ from .data_structures import DataId, DataRevisionId, DataVersion
 from .data_subscription_graph import DataSubscriptionGraph
 
 
+class NoConsistentCutError(LookupError):
+    """Available histories contain no compatible pair within the given bounds."""
+
+
+class _Comparison(Enum):
+    CONFLICT = auto()
+    EXACT = auto()
+    OMISSION = auto()
+
+
 def find_consistent_cut(
     left: DataSubscriptionGraph,
     right: DataSubscriptionGraph,
     cache: DataCache,
+    *,
+    lower_bounds: tuple[DataRevisionId | None, DataRevisionId | None] = (None, None),
 ) -> tuple[DataRevisionId, DataRevisionId]:
     """Return consistent (left revision, right revision), in argument order.
 
@@ -24,18 +37,32 @@ def find_consistent_cut(
 
     Otherwise, the first mismatching common node chooses the leading
     subscription, and the other stays fixed. Prefer matching all original
-    common nodes to omitting any; also check newly shared nodes. While a node
-    remains a dependency, both subscriptions record its changes and its
-    versions advance monotonically. Raise LookupError if no alignment exists.
+    common nodes to omitting any; also check newly shared nodes. Search newest
+    first, returning the first exact match. Retain the newest consistent omission
+    only as a fallback after every admissible exact candidate is ruled out.
+    Refreshed descendants can make expanded histories non-monotonic even when
+    published dependency versions advance monotonically. If holding one side fixed
+    cannot find an alignment, search both bounded histories as an exceptional fallback. Raise
+    LookupError if neither search finds a compatible pair.
 
     Trees loaded during the search are cached normally. No latest, proposed or
     current selection is changed; the caller can apply the
     returned revisions after reviewing or combining the result.
+
+    Updates supply committed currents as inclusive lower bounds. An exact
+    match below current is not a candidate: prefer an omission at current to
+    rolling back already delivered data. Initialization leaves these unbounded.
     """
     if left.proposed_revision is None or right.proposed_revision is None:
         raise LookupError("Both subscriptions need a proposed revision")
 
     left_revision, right_revision = left.proposed_revision, right.proposed_revision
+    for revision, floor in zip((left_revision, right_revision), lower_bounds):
+        if floor is not None:
+            if floor[0] != revision[0]:
+                raise ValueError("Lower bound belongs to a different data ID")
+            if revision < floor:
+                raise NoConsistentCutError("Proposed revision is below its lower bound")
     left_graph, right_graph = left.proposed_graph(cache), right.proposed_graph(cache)
 
     # Containment is stronger than ordinary overlap. Matching the contained
@@ -63,13 +90,20 @@ def find_consistent_cut(
         if contained[1] > target:
             # The other tree already identifies the required root version.
             # Resolve its revision directly; there are no count bounds to bisect.
+            floor = lower_bounds[0 if contained_is_left else 1]
+            if floor is not None and target < floor[1]:
+                # The consuming side may have an earlier compatible revision
+                # (including an omission). Do not cross the contained current.
+                return _search_both_histories(
+                    left, right, left_revision, right_revision, {contained[0]}, cache,
+                    *lower_bounds,
+                )
             adjusted = cache.get_latest_revision((contained[0], target))
             return (adjusted, right_revision) if contained_is_left else (left_revision, adjusted)
         # An earlier tournament comparison may have downgraded this root.
-        # Hold it fixed and search only for its version in the consuming tree.
+        # Hold it fixed and search for its version or a consistent omission.
+        # Retain its full tree: historical candidates may no longer contain it.
         common = {contained[0]}
-        mismatch = contained[0]
-        fixed_nodes = {contained[0]: contained[1]}
         leading_is_left = not contained_is_left
         leading = left if leading_is_left else right
         start = other
@@ -86,85 +120,128 @@ def find_consistent_cut(
         if mismatch is None:
             return left_revision, right_revision
 
-        # 2. Fix the lagging graph as the target. Crossing below its version
-        #    is a lower bound, not a reason to move that fixed subscription.
+        # 2. Fix the lagging graph as the target while searching the leading
+        #    subscription's bounded history.
         if left_nodes[mismatch] > right_nodes[mismatch]:
             leading, start = left, left_revision
-            fixed_nodes = right_nodes
             leading_is_left = True
         else:
             leading, start = right, right_revision
-            fixed_nodes = left_nodes
             leading_is_left = False
-    target = fixed_nodes[mismatch]
+    leading_floor = lower_bounds[0 if leading_is_left else 1]
+    fixed_floor = lower_bounds[1 if leading_is_left else 0]
+    fixed = right if leading_is_left else left
+    fixed_revision = right_revision if leading_is_left else left_revision
+    fixed_nodes = _nodes(right_graph if leading_is_left else left_graph, fixed_revision)
 
     def result(revision: DataRevisionId) -> tuple[DataRevisionId, DataRevisionId]:
         return (revision, right_revision) if leading_is_left else (left_revision, revision)
 
-    def nodes_at(version: DataVersion, count: int) -> dict[DataId, DataVersion]:
-        revision = (leading.data_id, version, count)
-        return _nodes(leading.revision(revision, cache), revision)
-
-    def exact_revision(
-        version: DataVersion, low: int, high: int
-    ) -> DataRevisionId | None:
-        """Bisect revision COUNTS in this one version, with inclusive bounds."""
-        if low > high:
-            return None
-        middle = (low + high) // 2
-        nodes = nodes_at(version, middle)
-
-        # Check the target set at every probe: the contained root alone, or all
-        # shared nodes for ordinary overlap. A lag moves forward; a lead moves back.
-        conflict = _first_mismatch(nodes, fixed_nodes)
-        if conflict in common:
-            if nodes[conflict] > fixed_nodes[conflict]:
-                return exact_revision(version, low, middle - 1)
-            return exact_revision(version, middle + 1, high)
-
-        # Absence cannot tell us which half contains an exact match: a node
-        # may disappear and reappear. A newly shared conflicting node may also
-        # disappear, so it cannot safely exclude either half. Search newer first.
-        newer = exact_revision(version, middle + 1, high)
-        if newer is not None:
-            return newer
-        if conflict is None and common <= nodes.keys():
-            return leading.data_id, version, middle
-        return exact_revision(version, low, middle - 1)
-
-    # 3. The selected proposed count is the initial upper bound, even if newer
-    #    revisions exist. Establish bounds using that count and revision zero.
-    #    If zero still leads, walk its previous_revision pointer. That pointer
-    #    supplies BOTH the actual previous version and its maximum count.
-    #    Never decrement a version number or bisect across different versions.
-    for version, maximum_count in _version_bounds(start, cache):
-        at_maximum = nodes_at(version, maximum_count).get(mismatch)
-        at_zero = nodes_at(version, 0).get(mismatch)
-        if at_maximum is not None and at_maximum < target:
-            break  # All earlier present values also lag: no exact match there.
-        if at_zero is not None and at_zero > target:
-            continue  # All present values in this version still lead.
-
-        # Zero lags, matches, or omits the node. The count range [0, maximum]
-        # is now bounded within ONE version; midpoint probes may move either way.
-        revision = exact_revision(version, 0, maximum_count)
-        if revision is not None:
+    # 3. Walk actual revisions newest first, respecting proposed/current bounds.
+    # Revision zero links to the preceding sparse version and its maximum count;
+    # only counts within a version are consecutive.
+    #
+    # A refreshed intermediate can change an expanded history from [1, 3, 5]
+    # to [7, 3, 5]. Neither endpoints nor middle probes can then rule out a range.
+    # Visiting newest first makes the first exact match the largest admissible
+    # revision, so it can return immediately without searching older records.
+    absent = None
+    for revision in _revisions_backwards(start, cache, leading_floor):
+        nodes = _nodes(leading.revision(revision, cache), revision)
+        comparison = _compare_candidates(revision, nodes, fixed_revision, fixed_nodes, common)
+        if comparison is _Comparison.CONFLICT:
+            continue
+        if comparison is _Comparison.EXACT:
             return result(revision)
-        if at_zero is not None and at_zero < target:
-            break
+        if absent is None:
+            absent = revision  # Remember the newest consistent omission only.
 
-    # 4. No exact alignment exists. Try missing-dependency candidates, newest
-    #    first, still checking the remaining nodes in the target set. Disappearance is
-    #    not monotonic, so this uncommon fallback cannot safely use binary search.
-    for version, maximum_count in _version_bounds(start, cache):
-        for count in range(maximum_count, -1, -1):
-            nodes = nodes_at(version, count)
-            if common <= nodes.keys():
+    # 4. An omission has lower precedence than every admissible exact match.
+    # Use it only after the entire bounded history has been searched.
+    if absent is not None:
+        return result(absent)
+    # Independent inputs may have been consumed in different orders, leaving no
+    # revision that matches the other side's complete fixed dependency vector.
+    # Only after the normal search fails do we allow both sides to move. Retain
+    # argument order and the original proposed upper bounds throughout.
+    joint = _search_both_histories(
+        leading, fixed, start, fixed_revision, common, cache, leading_floor, fixed_floor
+    )
+    return joint if leading_is_left else joint[::-1]
+
+
+def _search_both_histories(
+    leading: DataSubscriptionGraph,
+    fixed: DataSubscriptionGraph,
+    leading_start: DataRevisionId,
+    fixed_start: DataRevisionId,
+    common: set[DataId],
+    cache: DataCache,
+    leading_floor: DataRevisionId | None = None,
+    fixed_floor: DataRevisionId | None = None,
+) -> tuple[DataRevisionId, DataRevisionId]:
+    """Rare exhaustive fallback; prefer retaining the formerly fixed side.
+
+    Visit its history newest first, searching the leading history newest first
+    at each step. Prefer preserving the original common dependencies to omitting
+    them. This costs O(L * R) tree comparisons in the worst case, but does not
+    affect the normal one-sided search. Metadata failures propagate.
+    """
+    absent = None
+    for fixed_revision in _revisions_backwards(fixed_start, cache, fixed_floor):
+        fixed_nodes = _nodes(fixed.revision(fixed_revision, cache), fixed_revision)
+        for leading_revision in _revisions_backwards(leading_start, cache, leading_floor):
+            leading_nodes = _nodes(leading.revision(leading_revision, cache), leading_revision)
+            comparison = _compare_candidates(
+                leading_revision, leading_nodes, fixed_revision, fixed_nodes, common
+            )
+            if comparison is _Comparison.CONFLICT:
                 continue
-            if _first_mismatch(nodes, fixed_nodes) is None:
-                revision = (leading.data_id, version, count)
-                return result(revision)
-    raise LookupError("No revision aligns with the fixed subscription")
+            pair = leading_revision, fixed_revision
+            if comparison is _Comparison.EXACT:
+                return pair
+            if absent is None:
+                absent = pair
+    if absent is not None:
+        return absent
+    raise NoConsistentCutError("No compatible pair exists within the proposed histories")
+
+
+def _compare_candidates(
+    left_revision: DataRevisionId,
+    left_nodes: dict[DataId, DataVersion],
+    right_revision: DataRevisionId,
+    right_nodes: dict[DataId, DataVersion],
+    common: set[DataId],
+) -> _Comparison:
+    # Containment belongs to this candidate pair, not the original proposals.
+    # A matching root is exact even if its latest dependency revision has
+    # changed or removed descendants from the original common-node set.
+    if left_revision[0] in right_nodes:
+        matches = left_revision[1] == right_nodes[left_revision[0]]
+        return _Comparison.EXACT if matches else _Comparison.CONFLICT
+    if right_revision[0] in left_nodes:
+        matches = right_revision[1] == left_nodes[right_revision[0]]
+        return _Comparison.EXACT if matches else _Comparison.CONFLICT
+
+    # Without containment every shared node must agree, including newly shared
+    # nodes. Losing an original dependency cannot excuse a different conflict.
+    if _first_mismatch(left_nodes, right_nodes) is not None:
+        return _Comparison.CONFLICT
+    if common <= left_nodes.keys() and common <= right_nodes.keys():
+        return _Comparison.EXACT
+    return _Comparison.OMISSION
+
+
+def _revisions_backwards(
+    revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None = None
+) -> Iterator[DataRevisionId]:
+    # Counts are consecutive within a version. Version IDs are sparse and must
+    # be reached through revision-zero links, including the prior maximum count.
+    for version, maximum_count in _version_bounds(revision, cache, floor):
+        minimum_count = floor[2] if floor is not None and version == floor[1] else 0
+        for count in range(maximum_count, minimum_count - 1, -1):
+            yield revision[0], version, count
 
 
 def _nodes(graph: DataEdgeGraph, revision: DataRevisionId) -> dict[DataId, DataVersion]:
@@ -184,11 +261,15 @@ def _first_mismatch(
 
 
 def _version_bounds(
-    revision: DataRevisionId, cache: DataCache
+    revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None = None
 ) -> Iterator[tuple[DataVersion, int]]:
     data_id, version, maximum_count = revision
     while True:
+        if floor is not None and version < floor[1]:
+            return
         yield version, maximum_count
+        if floor is not None and version == floor[1]:
+            return  # No need to load history preceding the committed version.
         previous = cache.get_revision((data_id, version, 0)).previous_revision
         if previous is None:
             return

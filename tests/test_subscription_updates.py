@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import unittest
 from unittest.mock import patch
 
@@ -5,6 +6,9 @@ from hgraph_fabric.consistent_cut import find_consistent_cut
 from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_structures import DataUpdateDetails
 from hgraph_fabric.data_subscription_manager import DataSubscriptionManager
+
+
+AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 class UpdateOnlyCache(DataCache):
@@ -16,8 +20,17 @@ class UpdateOnlyCache(DataCache):
     def load_revision(self, revision_id):
         raise KeyError(revision_id)
 
-    def load_data(self, version_id):
+    def load_version(self, version_id):
         raise KeyError(version_id)
+
+    def write_version(self, version_id, data):
+        raise AssertionError("Update notifications must not write data")
+
+    def write_revision(self, revision_id, details):
+        raise AssertionError("Update notifications must not write revisions")
+
+    def write_latest(self, data_id, details):
+        raise AssertionError("Update notifications must not write latest")
 
 
 class SubscriptionUpdateTests(unittest.TestCase):
@@ -28,7 +41,7 @@ class SubscriptionUpdateTests(unittest.TestCase):
     def update(self, data_id, version, count=0, dependencies=None, previous=None):
         return DataUpdateDetails(
             id=data_id, revision=(version, count),
-            dependencies=dependencies, weak_dependencies=None, previous_revision=previous,
+            dependencies=dependencies, weak_dependencies=None, previous_revision=previous, as_of=AS_OF,
         )
 
     def seed_pair(self):
@@ -159,11 +172,11 @@ class SubscriptionUpdateTests(unittest.TestCase):
 
                 observed = []
 
-                def compare(left, right, cache):
+                def compare(left, right, cache, **kwargs):
                     observed.append((left.data_id, right.data_id))
                     for sub in self.manager._subscriptions.values():
                         self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
-                    return find_consistent_cut(left, right, cache)
+                    return find_consistent_cut(left, right, cache, **kwargs)
 
                 with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
                     advanced = self.manager.apply_update(
@@ -227,12 +240,12 @@ class SubscriptionUpdateTests(unittest.TestCase):
         a_update = self.update("a", 200, dependencies=(("x", 2),), previous=(100, 0))
         original_graphs = {sub.data_id: sub.current(self.cache) for sub in (a, b)}
 
-        def compare(left, right, cache):
+        def compare(left, right, cache, **kwargs):
             for sub in (a, b):
                 self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
                 self.assertIn((sub.data_id, 100, 0), sub._revision_graphs)
                 self.assertIs(sub.current(cache), original_graphs[sub.data_id])
-            return find_consistent_cut(left, right, cache)
+            return find_consistent_cut(left, right, cache, **kwargs)
 
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
             self.assertEqual(self.manager.apply_update(a_update), set())
@@ -252,7 +265,7 @@ class SubscriptionUpdateTests(unittest.TestCase):
         a, b = self.seed_pair()
         graphs = {sub.data_id: sub.current(self.cache) for sub in (a, b)}
 
-        def fail(left, right, cache):
+        def fail(left, right, cache, **kwargs):
             for sub in (a, b):
                 self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
                 self.assertIn((sub.data_id, 100, 0), sub._revision_graphs)
