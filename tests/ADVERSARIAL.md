@@ -16,8 +16,9 @@ python -I tests/run_adversarial.py --strict
 ```
 
 The original four review reproductions are ordinary passing regressions. The
-[second conflict-tracker review](CONFLICT_TRACKER_REVIEW.md) adds five explicitly
-expected failures (including one conditional shared-cache case). The strict
+[second conflict-tracker review](CONFLICT_TRACKER_REVIEW.md) retains three explicitly
+expected failures for missed wakeups and interrupted retries. Conflict cleanup is
+covered by passing regressions; shared-cache delivery follows the coordinated contract. The strict
 command exposes them without their wrappers; the normal suite is not defect-free.
 
 ## Passing scenario matrix

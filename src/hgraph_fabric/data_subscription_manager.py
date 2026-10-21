@@ -34,6 +34,11 @@ class DataSubscriptionManager:
 
     def apply_update(self, update: DataUpdateDetails) -> set[DataVersionId]:
         """Cache an update and return newly available subscription data versions."""
+        advanced = self._apply_update(update)
+        self.cleanup_conflicts()
+        return advanced
+
+    def _apply_update(self, update: DataUpdateDetails) -> set[DataVersionId]:
         self._cache.apply_update(update)
         revision = (update.id, *update.revision)
         # Only trees using this exact data version can have changed. Current
@@ -141,7 +146,25 @@ class DataSubscriptionManager:
         self._prepare_proposals(subscriptions)
         self._stabilize(subscriptions, [], list(range(len(subscriptions))))
         self._commit_proposals(subscriptions)
+        self.cleanup_conflicts()
         return {sub.current_revision[:2] for sub in subscriptions}
+
+    def cleanup_conflicts(self) -> None:
+        """Retire resolved roots and versions absent from current/latest trees.
+
+        Run after a completed update or initial cut, including blocked updates.
+        Keep live version markers while any recorded root is still waiting; that
+        root may be blocked by a peer's dependency rather than consume it itself.
+        Never clean up midway through the proposed-cut search.
+        """
+        waiting = {
+            sub.data_id for sub in self._subscriptions.values()
+            if sub.current_revision != sub.latest_revision
+        }
+        for version in list(self._conflicts):
+            self._conflicts[version].intersection_update(waiting)
+            if not self._conflicts[version] or version not in self._dependents:
+                del self._conflicts[version]
 
     def _prepare_proposals(self, subscriptions: tuple[DataSubscriptionGraph, ...]) -> None:
         for sub in subscriptions:
@@ -163,11 +186,6 @@ class DataSubscriptionManager:
                 self._index_dependencies(sub)
         self._consistent_revisions = {sub.data_id: sub.current_revision for sub in subscriptions}
         self._dirty_subscriptions.clear()
-        waiting = {sub.data_id for sub in subscriptions if sub.current_revision != sub.latest_revision}
-        for version in list(self._conflicts):
-            self._conflicts[version].intersection_update(waiting)
-            if not self._conflicts[version]:
-                del self._conflicts[version]
 
     def _rejected(self, subscriptions: tuple[DataSubscriptionGraph, ...], updated: int | None) -> bool:
         if updated is None:
