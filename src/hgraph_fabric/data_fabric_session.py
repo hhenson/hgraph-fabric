@@ -98,14 +98,17 @@ class PollingDataFabricSession(DataFabricSession):
         self.stop()
 
     def poll(self, timeout: float | None = None) -> dict[DataId, Table]:
-        """Receive until data advances or the total timeout expires ({}).
+        """Initialize pending subscriptions, otherwise receive until data advances.
 
+        Initialization returns the full consistent cut before receiving messages.
         Timeout is in seconds; None waits indefinitely. Zero makes one
         nonblocking attempt. Notifications without a delta consume the same
         timeout budget, rather than starting a fresh wait.
         """
         if timeout is not None and timeout < 0:
             raise ValueError("Timeout must be nonnegative")
+        if not self._subscriptions.is_initialized:
+            return self.get_consistent_cut()
         deadline = None if timeout is None else monotonic() + timeout
         remaining = timeout
         while True:

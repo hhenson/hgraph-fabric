@@ -32,6 +32,11 @@ class DataSubscriptionManager:
         for data_id in data_ids:
             self.add_subscription(data_id)
 
+    @property
+    def is_initialized(self) -> bool:
+        """Whether every registered subscription has a current revision."""
+        return all(sub.current_revision is not None for sub in self._subscriptions.values())
+
     def apply_update(self, update: DataUpdateDetails) -> set[DataVersionId]:
         """Cache an update and return newly available subscription data versions."""
         advanced = self._apply_update(update)

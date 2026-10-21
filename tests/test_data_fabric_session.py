@@ -147,6 +147,62 @@ class PollingDataFabricSessionTests(unittest.TestCase):
             self.transport.stop.assert_not_called()
         self.transport.stop.assert_called_once_with()
 
+    def test_poll_initializes_single_or_bulk_subscriptions_without_a_message(self):
+        publisher = DataFabricSession(self.cache)
+        a, _ = publish(publisher, "a", 100)
+        b, _ = publish(publisher, "b", 200)
+        for bulk in (False, True):
+            with self.subTest(bulk=bulk):
+                session = PollingDataFabricSession(self.cache, self.transport)
+                if bulk:
+                    session.add_subscriptions(iter(["a", "b"]))
+                else:
+                    session.add_subscription("a")
+                result = session.poll()
+                self.assertEqual(set(result), {"a", "b"} if bulk else {"a"})
+                self.assertIs(result["a"], a)
+                if bulk:
+                    self.assertIs(result["b"], b)
+        self.transport.poll.assert_not_called()
+        self.transport.send.assert_not_called()
+
+    def test_poll_reinitializes_whole_cut_when_added_subscription_requires_downgrade(self):
+        publisher = DataFabricSession(self.cache)
+        publish(publisher, "x", 1)
+        publish(publisher, "x", 2)
+        a100, _ = publish(publisher, "a", 100, (("x", 1),))
+        a200, _ = publish(publisher, "a", 200, (("x", 2),))
+        b100, _ = publish(publisher, "b", 100, (("x", 1),))
+        a = self.session.add_subscription("a")
+        self.assertIs(self.session.poll(0)["a"], a200)
+        b = self.session.add_subscription("b")
+        self.assertIsNone(b.current_revision)
+        result = self.session.poll(0)
+        self.assertEqual(set(result), {"a", "b"})
+        self.assertIs(result["a"], a100)
+        self.assertIs(result["b"], b100)
+        self.assertEqual(a.current_revision, ("a", 100, 0))
+        self.assertEqual(b.current_revision, ("b", 100, 0))
+        self.transport.poll.assert_not_called()
+
+    def test_duplicate_registration_does_not_repeat_initialization(self):
+        publish(DataFabricSession(self.cache), "a", 100)
+        self.session.add_subscription("a")
+        self.session.poll(0)
+        self.session.add_subscriptions(["a", "a"])
+        self.transport.poll.return_value = None
+        with patch.object(self.session, "get_consistent_cut", side_effect=AssertionError("Already initialized")):
+            self.assertEqual(self.session.poll(0), {})
+        self.transport.poll.assert_called_once_with(0)
+
+    def test_explicit_cut_initializes_before_poll(self):
+        publish(DataFabricSession(self.cache), "a", 100)
+        self.session.add_subscription("a")
+        self.session.get_consistent_cut()
+        self.transport.poll.return_value = None
+        self.assertEqual(self.session.poll(0), {})
+        self.transport.poll.assert_called_once_with(0)
+
     def test_context_manager_stops_without_suppressing_exception(self):
         error = RuntimeError("Processing failed")
         with self.assertRaises(RuntimeError) as raised:
@@ -180,16 +236,18 @@ class PollingDataFabricSessionTests(unittest.TestCase):
     def test_poll_consumes_one_remote_update_without_sending_it_again(self):
         writer = MemoryDataCache()
         publisher = DataFabricSession(writer)
-        a, update_a = publish(publisher, "a", 100)
-        b, update_b = publish(publisher, "b", 200)
+        publish(publisher, "a", 100)
+        _, update_b = publish(publisher, "b", 200)
         self.cache.latest_values = writer.latest_values
         self.cache.revision_values = writer.revision_values
         self.cache.data_values = writer.data_values
         self.session.add_subscriptions(["a", "b"])
+        self.session.get_consistent_cut()
+        a, update_a = publish(publisher, "a", 300)
         self.transport.poll.side_effect = [update_a, update_b, None]
         result = self.session.poll(0)
         self.assertIs(result["a"], a)
-        self.assertIs(result["b"], b)
+        self.assertEqual(set(result), {"a"})
         self.assertEqual(self.transport.poll.call_count, 1)
         self.assertEqual(self.session.poll(0), {})
         self.assertEqual(self.session.poll(0), {})
