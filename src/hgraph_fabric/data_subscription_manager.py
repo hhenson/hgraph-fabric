@@ -1,7 +1,7 @@
 from collections import deque
 from collections.abc import Iterable
 
-from .consistent_cut import find_consistent_cut
+from .consistent_cut import NoConsistentCutError, find_consistent_cut
 from .data_cache import DataCache
 from .data_structures import DataId, DataRevisionId, DataUpdateDetails, DataVersionId
 from .data_subscription_graph import DataSubscriptionGraph
@@ -39,11 +39,16 @@ class DataSubscriptionManager:
         subscriptions = tuple(self._subscriptions.values())
         self._prepare_proposals(subscriptions)
         updated = subscriptions.index(subscription)
-        if current != self._consistent_revisions:
-            # Without a validated existing cut there is no stable set to reuse.
-            accepted = self._stabilize(subscriptions, [], list(range(len(subscriptions))), updated)
-        else:
-            accepted = self._advance_cut(subscriptions, updated)
+        try:
+            if current != self._consistent_revisions:
+                # Without a validated existing cut there is no stable set to reuse.
+                accepted = self._stabilize(subscriptions, [], list(range(len(subscriptions))), updated)
+            else:
+                accepted = self._advance_cut(subscriptions, updated)
+        except NoConsistentCutError:
+            # No forward cut is available. Missing/malformed metadata remains
+            # an error and must not be mistaken for a blocked update.
+            return set()
         if not accepted:
             return set()
         self._commit_proposals(subscriptions)
@@ -69,6 +74,10 @@ class DataSubscriptionManager:
             sub.proposed_revision = sub.latest_revision
 
     def _commit_proposals(self, subscriptions: tuple[DataSubscriptionGraph, ...]) -> None:
+        # Even a single subscription must expand its full proposed tree. Do all
+        # loads before selecting/pruning any current so a failure is atomic.
+        for sub in subscriptions:
+            sub.proposed_graph(self._cache)
         # Search only touches proposed selections. Prune history when the whole
         # cut is accepted, using the normal current setter for changed items.
         for sub in subscriptions:
@@ -87,9 +96,18 @@ class DataSubscriptionManager:
             for sub in subscriptions
         )
 
-    def _resolve(self, subscriptions: tuple[DataSubscriptionGraph, ...], pair: tuple[int, int]) -> list[int]:
+    def _resolve(
+        self, subscriptions: tuple[DataSubscriptionGraph, ...], pair: tuple[int, int],
+        updated: int | None = None,
+    ) -> list[int]:
         left, right = (subscriptions[i] for i in pair)
-        revisions = find_consistent_cut(left, right, self._cache)
+        if updated is None:
+            revisions = find_consistent_cut(left, right, self._cache)
+        else:
+            revisions = find_consistent_cut(
+                left, right, self._cache,
+                lower_bounds=(left.current_revision, right.current_revision),
+            )
         changed = []
         for index, revision in zip(pair, revisions):
             if subscriptions[index].proposed_revision != revision:
@@ -110,7 +128,7 @@ class DataSubscriptionManager:
             other = pending.popleft()
             queued.remove(other)
             pair = (min(updated, other), max(updated, other))
-            changed = self._resolve(subscriptions, pair)
+            changed = self._resolve(subscriptions, pair, updated)
             if self._rejected(subscriptions, updated):
                 return False
             if updated in changed:
@@ -149,7 +167,7 @@ class DataSubscriptionManager:
             while pending:
                 pair = pending.popleft()
                 queued.remove(pair)
-                changed = self._resolve(subscriptions, pair)
+                changed = self._resolve(subscriptions, pair, updated)
                 if self._rejected(subscriptions, updated):
                     return False
                 for index in changed:

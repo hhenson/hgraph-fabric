@@ -24,7 +24,9 @@ or `add_subscriptions(data_ids)`, loading their latest trees.
 prefix one subscription at a time using `find_consistent_cut`. That pairwise
 function compares proposed selections. If either proposal moves backwards, its
 comparisons within the prefix are queued again. Only after the complete set is
-consistent are proposals copied to current. Failed searches leave current intact.
+consistent are proposals copied to current. Before committing, every proposed
+full tree is loaded, including a single subscription with no pair comparisons.
+Failed searches or tree loads leave current intact.
 
 `apply_update(update)` always updates the cache. Only an update for a subscribed
 data ID changes that subscription's latest revision and triggers recalculation.
@@ -32,7 +34,9 @@ With an established cut, it sets proposals to latest and first compares the
 updated item against every other item, rechecking earlier matches if its proposal
 changes. If that proposal drops to its committed current (or below), it stops
 immediately and retains the existing cut. The update must also leave every other
-subscription at or above its committed current.
+subscription at or above its committed current. These currents are inclusive
+search bounds: an exact match below current cannot displace a valid omission
+at current. Bounds apply to both version IDs and revision counts.
 
 If the updated item can advance, it and the unchanged peers form the stable set.
 Other improved peers are inserted one at a time, propagating invalidated pair

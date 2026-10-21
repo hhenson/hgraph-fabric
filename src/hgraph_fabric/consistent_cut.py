@@ -6,10 +6,16 @@ from .data_structures import DataId, DataRevisionId, DataVersion
 from .data_subscription_graph import DataSubscriptionGraph
 
 
+class NoConsistentCutError(LookupError):
+    """Available histories contain no compatible pair within the given bounds."""
+
+
 def find_consistent_cut(
     left: DataSubscriptionGraph,
     right: DataSubscriptionGraph,
     cache: DataCache,
+    *,
+    lower_bounds: tuple[DataRevisionId | None, DataRevisionId | None] = (None, None),
 ) -> tuple[DataRevisionId, DataRevisionId]:
     """Return consistent (left revision, right revision), in argument order.
 
@@ -33,11 +39,21 @@ def find_consistent_cut(
     Trees loaded during the search are cached normally. No latest, proposed or
     current selection is changed; the caller can apply the
     returned revisions after reviewing or combining the result.
+
+    Updates supply committed currents as inclusive lower bounds. An exact
+    match below current is not a candidate: prefer an omission at current to
+    rolling back already delivered data. Initialization leaves these unbounded.
     """
     if left.proposed_revision is None or right.proposed_revision is None:
         raise LookupError("Both subscriptions need a proposed revision")
 
     left_revision, right_revision = left.proposed_revision, right.proposed_revision
+    for revision, floor in zip((left_revision, right_revision), lower_bounds):
+        if floor is not None:
+            if floor[0] != revision[0]:
+                raise ValueError("Lower bound belongs to a different data ID")
+            if revision < floor:
+                raise NoConsistentCutError("Proposed revision is below its lower bound")
     left_graph, right_graph = left.proposed_graph(cache), right.proposed_graph(cache)
 
     # Containment is stronger than ordinary overlap. Matching the contained
@@ -65,6 +81,14 @@ def find_consistent_cut(
         if contained[1] > target:
             # The other tree already identifies the required root version.
             # Resolve its revision directly; there are no count bounds to bisect.
+            floor = lower_bounds[0 if contained_is_left else 1]
+            if floor is not None and target < floor[1]:
+                # The consuming side may have an earlier compatible revision
+                # (including an omission). Do not cross the contained current.
+                return _search_both_histories(
+                    left, right, left_revision, right_revision, {contained[0]}, cache,
+                    *lower_bounds,
+                )
             adjusted = cache.get_latest_revision((contained[0], target))
             return (adjusted, right_revision) if contained_is_left else (left_revision, adjusted)
         # An earlier tournament comparison may have downgraded this root.
@@ -99,6 +123,8 @@ def find_consistent_cut(
             fixed_nodes = left_nodes
             leading_is_left = False
     target = fixed_nodes[mismatch]
+    leading_floor = lower_bounds[0 if leading_is_left else 1]
+    fixed_floor = lower_bounds[1 if leading_is_left else 0]
 
     def result(revision: DataRevisionId) -> tuple[DataRevisionId, DataRevisionId]:
         return (revision, right_revision) if leading_is_left else (left_revision, revision)
@@ -135,44 +161,48 @@ def find_consistent_cut(
         return exact_revision(version, low, middle - 1)
 
     # 3. The selected proposed count is the initial upper bound, even if newer
-    #    revisions exist. Establish bounds using that count and revision zero.
-    #    If zero still leads, walk its previous_revision pointer. That pointer
+    #    revisions exist. The lower count is zero, or the committed count when
+    #    this is the floor version. Walk revision zero to earlier versions only
+    #    while still above that floor. Its previous_revision pointer
     #    supplies BOTH the actual previous version and its maximum count.
     #    Never decrement a version number or bisect across different versions.
-    for version, maximum_count in _version_bounds(start, cache):
+    for version, maximum_count in _version_bounds(start, cache, leading_floor):
+        minimum_count = (
+            leading_floor[2] if leading_floor is not None and version == leading_floor[1] else 0
+        )
         at_maximum = nodes_at(version, maximum_count).get(mismatch)
-        at_zero = nodes_at(version, 0).get(mismatch)
+        at_minimum = nodes_at(version, minimum_count).get(mismatch)
         if at_maximum is not None and at_maximum < target:
             break  # All earlier present values also lag: no exact match there.
-        if at_zero is not None and at_zero > target:
+        if at_minimum is not None and at_minimum > target:
             continue  # All present values in this version still lead.
 
-        # Zero lags, matches, or omits the node. The count range [0, maximum]
-        # is now bounded within ONE version; midpoint probes may move either way.
-        revision = exact_revision(version, 0, maximum_count)
+        # The oldest admissible count lags, matches, or omits the node. Bisect
+        # within ONE version, stopping at current's count in the floor version.
+        revision = exact_revision(version, minimum_count, maximum_count)
         if revision is not None:
             return result(revision)
-        if at_zero is not None and at_zero < target:
+        if at_minimum is not None and at_minimum < target:
             break
 
     # 4. No exact alignment exists. Try missing-dependency candidates, newest
     #    first, still checking the remaining nodes in the target set. Disappearance is
     #    not monotonic, so this uncommon fallback cannot safely use binary search.
-    for version, maximum_count in _version_bounds(start, cache):
-        for count in range(maximum_count, -1, -1):
-            nodes = nodes_at(version, count)
-            if common <= nodes.keys():
-                continue
-            if _first_mismatch(nodes, fixed_nodes) is None:
-                revision = (leading.data_id, version, count)
-                return result(revision)
+    for revision in _revisions_backwards(start, cache, leading_floor):
+        nodes = nodes_at(revision[1], revision[2])
+        if common <= nodes.keys():
+            continue
+        if _first_mismatch(nodes, fixed_nodes) is None:
+            return result(revision)
     # Independent inputs may have been consumed in different orders, leaving no
     # revision that matches the other side's complete fixed dependency vector.
     # Only after the normal search fails do we allow both sides to move. Retain
     # argument order and the original proposed upper bounds throughout.
     fixed = right if leading_is_left else left
     fixed_revision = right_revision if leading_is_left else left_revision
-    joint = _search_both_histories(leading, fixed, start, fixed_revision, common, cache)
+    joint = _search_both_histories(
+        leading, fixed, start, fixed_revision, common, cache, leading_floor, fixed_floor
+    )
     return joint if leading_is_left else joint[::-1]
 
 
@@ -183,6 +213,8 @@ def _search_both_histories(
     fixed_start: DataRevisionId,
     common: set[DataId],
     cache: DataCache,
+    leading_floor: DataRevisionId | None = None,
+    fixed_floor: DataRevisionId | None = None,
 ) -> tuple[DataRevisionId, DataRevisionId]:
     """Rare exhaustive fallback; prefer retaining the formerly fixed side.
 
@@ -192,9 +224,9 @@ def _search_both_histories(
     affect the normal bounded/binary search. Metadata failures propagate.
     """
     absent = None
-    for fixed_revision in _revisions_backwards(fixed_start, cache):
+    for fixed_revision in _revisions_backwards(fixed_start, cache, fixed_floor):
         fixed_nodes = _nodes(fixed.revision(fixed_revision, cache), fixed_revision)
-        for leading_revision in _revisions_backwards(leading_start, cache):
+        for leading_revision in _revisions_backwards(leading_start, cache, leading_floor):
             leading_nodes = _nodes(leading.revision(leading_revision, cache), leading_revision)
             # Historical membership can differ from the initial pair. Apply
             # the same root-containment rule to each candidate pair afresh.
@@ -213,16 +245,17 @@ def _search_both_histories(
                 absent = pair
     if absent is not None:
         return absent
-    raise LookupError("No compatible pair exists within the proposed histories")
+    raise NoConsistentCutError("No compatible pair exists within the proposed histories")
 
 
 def _revisions_backwards(
-    revision: DataRevisionId, cache: DataCache
+    revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None = None
 ) -> Iterator[DataRevisionId]:
     # Counts are consecutive within a version. Version IDs are sparse and must
     # be reached through revision-zero links, including the prior maximum count.
-    for version, maximum_count in _version_bounds(revision, cache):
-        for count in range(maximum_count, -1, -1):
+    for version, maximum_count in _version_bounds(revision, cache, floor):
+        minimum_count = floor[2] if floor is not None and version == floor[1] else 0
+        for count in range(maximum_count, minimum_count - 1, -1):
             yield revision[0], version, count
 
 
@@ -243,11 +276,15 @@ def _first_mismatch(
 
 
 def _version_bounds(
-    revision: DataRevisionId, cache: DataCache
+    revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None = None
 ) -> Iterator[tuple[DataVersion, int]]:
     data_id, version, maximum_count = revision
     while True:
+        if floor is not None and version < floor[1]:
+            return
         yield version, maximum_count
+        if floor is not None and version == floor[1]:
+            return  # No need to load history preceding the committed version.
         previous = cache.get_revision((data_id, version, 0)).previous_revision
         if previous is None:
             return

@@ -1,9 +1,9 @@
 # Adversarial stabilisation review
 
 Original reviewed implementation: `b50c01d` (the proposed-cut and affected-item
-update algorithm). Finding 1 is now addressed by an exceptional joint-history
-fallback. The remaining three cases are preserved, with their assumptions made
-explicit below.
+update algorithm). Findings 1, 2 and 4 are addressed by a joint-history fallback,
+commit-time tree validation, and committed-current search bounds respectively.
+Finding 3 remains open pending dependency-refresh semantics.
 
 ## Run
 
@@ -15,9 +15,9 @@ python -I tests/run_adversarial.py
 python -I tests/run_adversarial.py --strict
 ```
 
-The first two commands include three explicitly labelled `expectedFailure` tests.
+The first two commands include one explicitly labelled `expectedFailure` test.
 They do **not** mean the implementation has no defects. The strict command removes
-that designation and exits unsuccessfully, exposing each original failure.
+that designation and exits unsuccessfully, exposing the remaining retained-tree failure.
 An unexpected success in the normal suite fails the run so a repaired finding
 must have its expected-failure designation removed.
 
@@ -79,17 +79,17 @@ normal successful comparisons retain the existing search and cost.
 Location: [`consistent_cut.py`](../src/hgraph_fabric/consistent_cut.py#L89).
 Reproduction: `test_crossed_input_frontiers_find_the_existing_older_cut`.
 
-### 2. A single-subscription update commits an unloadable tree (contract-dependent)
+### 2. A single-subscription update commits an unloadable tree (addressed)
 
 Start with a valid leaf subscription `a@100`, then update `a@200` to depend on an
 unavailable version. With no other subscriptions there are no pair comparisons,
 and nothing builds the proposed tree before commit. `apply_update` reports
 `a@200` as available; loading its current graph afterwards raises `KeyError`.
-The existing multi-subscription failure-isolation behaviour is bypassed.
-This test assumes tree loadability must be checked before committing a cut.
-If publication guarantees that all dependency metadata is available, the
-missing-metadata example is outside that contract; a single valid tree has no
-inter-subscription consistency constraint to check.
+The commit path now loads every proposed full tree before changing any current
+selection or pruning retained history. This also covers a single subscription
+without pair comparisons. Missing metadata and conflicting versions propagate
+as errors, preserving the previous current. Tree loadability is required even
+when there are no inter-subscription constraints to compare.
 
 Location: [`data_subscription_manager.py`](../src/hgraph_fabric/data_subscription_manager.py#L71).
 Reproduction: `test_single_subscription_does_not_commit_unloadable_tree`.
@@ -115,7 +115,7 @@ invalidation semantics; this review does not choose between them.
 Location: [`data_subscription_graph.py`](../src/hgraph_fabric/data_subscription_graph.py#L60).
 Reproduction: `test_same_revision_cut_is_independent_of_retained_tree_cache`.
 
-### 4. An unrelated waiting history can block independent progress (medium priority)
+### 4. An unrelated waiting history can block independent progress (addressed)
 
 Root `a` is an independent leaf. Root `b` has history `100: x@1`, `200: no x`,
 `300: x@2`; `c` consumes `x@1`. The committed cut uses `b@200`, while `b@300` is
@@ -124,10 +124,16 @@ waiting. Updating `a` from 100 to 200 should permit the witness cut
 match `b@100`, and the lower-bound guard rejects the entire update. `a` never
 reverts to its old proposal, yet its independent advancement is blocked.
 
-This is a progress limitation, not an inconsistent commit. The pair search's
-preference for exact matches currently has no committed-current lower bound.
-Considering the current dependency-free fallback within that bound would keep
-the valid witness available.
+Update comparisons now supply committed currents as inclusive lower bounds.
+The exact-match search, omission fallback, containment handling and joint search
+all respect those bounds, including counts within a version. Thus `b@100` is
+excluded, `b@200` is retained, and `a@200` commits. Initialization remains
+unbounded. A dedicated no-compatible-pair exception rejects an update without
+swallowing missing metadata or malformed-history errors.
+
+`test_adversarial_update_bounds.py` covers every registration order with sparse
+versions and within-version counts, containment and joint-search bounds, avoiding
+loads below the floor, and single-root full-tree validation and failure isolation.
 
 Locations: [`consistent_cut.py`](../src/hgraph_fabric/consistent_cut.py#L135) and
 [`data_subscription_manager.py`](../src/hgraph_fabric/data_subscription_manager.py#L85).

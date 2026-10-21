@@ -28,7 +28,6 @@ class AdversarialKnownGaps(unittest.TestCase):
         manager.add_subscriptions(("a", "b"))
         self.assertEqual(manager.get_consistent_cut(), {r[:2] for r in witness.values()})
 
-    @unittest.expectedFailure
     def test_single_subscription_does_not_commit_unloadable_tree(self):
         history = History()
         history.add("a", 100)
@@ -64,7 +63,6 @@ class AdversarialKnownGaps(unittest.TestCase):
         # timing. The cold tree sees middle's latest count; the warm one does not.
         self.assertEqual(warm.get_consistent_cut(), expected)
 
-    @unittest.expectedFailure
     def test_unrelated_pending_history_does_not_block_independent_progress(self):
         # A liveness gap in the proposed algorithm, not an unsafe commit:
         # exact-match preference searches below b's committed lower bound even
