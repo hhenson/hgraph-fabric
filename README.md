@@ -182,6 +182,30 @@ subscriptions advance when their publication is polled. The caller drives the
 loop and coordinates delivery with cache operations; storage and transport
 errors propagate. Arrow tables remain in shared storage.
 
+`run_data_fabric_session(cache, transport, callback, subscriptions=ids)` runs the
+polling session on a worker thread and yields a thread-safe publish callable:
+
+```python
+from hgraph_fabric.data_fabric_session import run_data_fabric_session
+
+with run_data_fabric_session(cache, transport, on_update, subscriptions=["prices"]) as publish:
+    written_table, update = publish(output_table, id="result")
+```
+
+The worker starts the session, registers subscriptions, and calls
+`on_update(dict[DataId, Table])` for the initial cut and later nonempty changes.
+Callbacks run on the worker and may begin before the context body. Publications
+from other threads are queued and wait for their result; a callback can use the
+publish callable directly without deadlocking. Cache and transport operations
+all run on the worker; callers must not access those objects concurrently.
+
+Context exit finishes accepted publications, stops the session and joins the
+worker. A finite positive `poll_interval` (default 0.05 seconds) bounds transport
+waits so the worker can handle publications and shutdown. Transports must honor
+timeouts and callbacks must return for shutdown to finish. Worker failures stop
+processing, release waiting publishers with the error, and propagate on context
+exit. There is no retry or recovery loop.
+
 ## Design reference
 
 The existing implementation lives in
