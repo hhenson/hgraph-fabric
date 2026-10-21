@@ -13,8 +13,45 @@ The package currently provides identity aliases, frozen revision metadata,
 a lazy data cache with abstract storage loaders, and a directed dependency
 edge graph with version checks and node queries. The subscription graph
 builds and retains full strong-dependency graphs breadth first, using the cache's
-latest-revision lookup for each specific dependency version. Latest/current
-revision selection is explicit; weak dependencies are excluded.
+latest-revision lookup for each specific dependency version. Each subscription
+tracks `latest_revision`, `proposed_revision` and `current_revision` independently.
+`proposed_graph(cache)` loads the proposed tree without pruning retained history;
+weak dependencies are excluded.
+`DataSubscriptionManager(cache)` registers roots with `add_subscription(data_id)`
+or `add_subscriptions(data_ids)`, loading their latest trees.
+
+`get_consistent_cut()` initializes proposals to latest and builds a consistent
+prefix one subscription at a time using `find_consistent_cut`. That pairwise
+function compares proposed selections. If either proposal moves backwards, its
+comparisons within the prefix are queued again. Only after the complete set is
+consistent are proposals copied to current. Failed searches leave current intact.
+
+`apply_update(update)` always updates the cache. Only an update for a subscribed
+data ID changes that subscription's latest revision and triggers recalculation.
+With an established cut, it sets proposals to latest and first compares the
+updated item against every other item, rechecking earlier matches if its proposal
+changes. If that proposal drops to its committed current (or below), it stops
+immediately and retains the existing cut. The update must also leave every other
+subscription at or above its committed current.
+
+If the updated item can advance, it and the unchanged peers form the stable set.
+Other improved peers are inserted one at a time, propagating invalidated pair
+comparisons. The same early-stop rule applies during this second stage. Only a
+complete consistent proposal is committed; current selections and their retained
+graphs remain available throughout the search. Without a validated existing cut,
+it constructs the full proposed cut first.
+
+The update returns the `set[DataVersionId]` of subscriptions whose current data
+version advanced, including newly selected subscriptions and waiting peers.
+Revision-count changes can advance the cut but do not indicate new data and are
+excluded from the returned set.
+
+The pairwise search keeps the lagging subscription fixed, follows revision-zero
+links across sparse versions, and binary-searches counts within one version.
+If one subscription's root occurs in the other tree, only that root version
+needs to match; otherwise all common nodes are checked. Subscriptions record
+dependency changes while those dependencies remain present. Exact matches
+take priority over missing-dependency candidates.
 Concrete storage backends and end-to-end fabric execution are not implemented.
 
 The cache's `latest(data_id)` returns a revision ID. Historical version lookup
