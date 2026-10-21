@@ -40,8 +40,10 @@ data ID changes that subscription's latest revision and attempts advancement.
 For dependency updates, the manager indexes current and latest trees by exact
 `DataVersionId`, and refreshes affected trees. A conflict tracker records versions
 on paths to mismatched nodes when comparisons downgrade proposals or cannot find
-a bounded cut. An intermediate version is tracked too: its next revision may
-change the conflicting dependency.
+a bounded cut. It watches consumers whose revisions can change the referenced
+version, excluding the mismatched endpoint and IDs already subscribed. For
+`A -> Y` versus `B -> M -> Y`, only M needs a soft revision watch: A and B
+already receive subscription updates, and revising Y cannot change its version.
 
 An unsubscribed dependency update attempts advancement only if that exact version
 has a recorded conflict, at least two subscriptions depend on it, and an affected
@@ -52,6 +54,10 @@ committed per notification. `cleanup_conflicts()` retires caught-up roots and
 versions absent from all current/latest trees. It runs automatically after each
 completed update (including a blocked update) and initial cut, and can also be
 called explicitly. Live conflicts remain tracked while roots are waiting.
+Affected waiting roots come from the dependency index, including those downgraded
+onto a tracked path by later comparisons. Unexpected errors propagate to the
+caller and are fatal to processing; recovery and replay after errors are not part
+of this contract.
 
 Tree refresh and cut advancement are separate. When the gate skips a search,
 root selections stay unchanged; refreshed current trees are marked for comparison

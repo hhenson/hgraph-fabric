@@ -34,8 +34,8 @@ class DependencyRefreshTests(unittest.TestCase):
             for order in permutations(("a", "b", "peer")):
                 with self.subTest(nested=nested, order=order):
                     history, cache, manager = self.waiting(order=order, nested=nested)
-                    self.assertIn(("middle", 100), manager._conflicts)
-                    self.assertNotIn(("unrelated", 100), manager._conflicts)
+                    watched = {("middle", 100), ("outer", 100)} if nested else {("middle", 100)}
+                    self.assertEqual(set(manager._conflicts), watched)
                     self.assertEqual(manager._dependents[("middle", 100)], {"a", "b"})
                     update = history.add("middle", 100, 1, dependencies=(("x", 2),))
                     self.assertEqual(manager.apply_update(update), {("a", 9000), ("b", 9000)})
@@ -56,6 +56,29 @@ class DependencyRefreshTests(unittest.TestCase):
         self.assertEqual(a.current_revision, ("a", 100, 0))
         self.assertTrue(a.latest(cache).has_node(("x", 2)))
         self.assertEqual(manager.get_consistent_cut(), {("a", 9000), ("peer", 100)})
+
+    def test_subscribed_intermediate_needs_no_soft_watch(self):
+        history = History()
+        history.add("x", 1)
+        history.add("x", 2)
+        history.add("middle", 100, dependencies=(("x", 1),))
+        history.add("middle", 200, dependencies=(("x", 2),))
+        history.add("outer", 100, dependencies=(("middle", 100),))
+        for root in ("a", "b"):
+            history.add(root, 100)
+            history.add(root, 200, dependencies=(("outer", 100),))
+        history.add("peer", 100, dependencies=(("x", 2),))
+        manager = DataSubscriptionManager(HistoryCache(history))
+        manager.add_subscriptions(("a", "b", "peer", "middle"))
+        manager.get_consistent_cut()
+        # Continue walking past a subscribed intermediate to watch outer,
+        # whose revisions can change the consumed middle version.
+        self.assertEqual(set(manager._conflicts), {("outer", 100)})
+        self.assertEqual(manager.apply_update(history.add(
+            "outer", 100, 1, dependencies=(("middle", 200),)
+        )), {("a", 200), ("b", 200)})
+        self.assertTrue(history.consistent(current_cut(manager)))
+        self.assertEqual(manager._conflicts, {})
 
     def test_all_dependents_at_latest_refresh_without_search(self):
         history, cache, manager = self.waiting()
@@ -115,15 +138,13 @@ class DependencyRefreshTests(unittest.TestCase):
                          {("peer", 9000), ("independent", 9000)})
         self.assertTrue(history.consistent(current_cut(manager)))
 
-    def test_failed_refresh_preserves_selections_and_duplicate_can_retry(self):
+    def test_failed_refresh_propagates_without_changing_selections(self):
         history, cache, manager = self.waiting()
         before = current_cut(manager)
         update = history.add("middle", 100, 1, dependencies=(("missing", 1), ("x", 2)))
         with self.assertRaises(KeyError):
             manager.apply_update(update)
         self.assertEqual(current_cut(manager), before)
-        manager.apply_update(history.add("missing", 1))
-        self.assertEqual(manager.apply_update(update), {("a", 9000), ("b", 9000)})
 
     def test_retained_historical_tree_refreshes_without_a_selected_subscription(self):
         history = History()
