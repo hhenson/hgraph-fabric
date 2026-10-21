@@ -29,8 +29,12 @@ The two reproductions pass, along with 2,916 additional refreshed-history cases.
 The [containment transition review](CONTAINMENT_TRANSITION_REVIEW.md) adds changing
 topologies and candidate-specific containment cases. Its inconsistent omission
 acceptance and missed historical containment matches are now addressed by a
-shared candidate comparison in both search paths. The full suite has 161 passing
-tests with no expected failures; the strict adversarial runner has 54 passing tests.
+shared candidate comparison in both search paths.
+
+The [mixed-role review](MIXED_ROLE_REVIEW.md) adds 13,440 generated updates,
+3,072 bounded pair comparisons against exhaustive candidate sets, and late
+subscription cases. No new defect was reproduced. The full suite has 164 passing
+tests with no expected failures; the strict adversarial runner has 57 passing tests.
 
 ## Passing scenario matrix
 
