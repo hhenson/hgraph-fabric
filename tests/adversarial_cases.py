@@ -92,6 +92,15 @@ class HistoryCache(DataCache):
     def load_data(self, version):
         raise AssertionError("Metadata search must not load dataframe payloads")
 
+    def write_version(self, version_id, data):
+        raise AssertionError("Metadata search must not write data")
+
+    def write_revision(self, revision_id, details):
+        raise AssertionError("Metadata search must not write revisions")
+
+    def write_latest(self, data_id, details):
+        raise AssertionError("Metadata search must not write latest")
+
 
 def current_cut(manager):
     return {key: sub.current_revision for key, sub in manager._subscriptions.items()}

@@ -17,6 +17,7 @@ class MemoryDataCache(DataCache):
         self.data_values = {}
         self.revision_values = {}
         self.loads = []
+        self.writes = []
 
     def load_latest(self, data_id):
         self.loads.append(("latest", data_id))
@@ -29,6 +30,18 @@ class MemoryDataCache(DataCache):
     def load_revision(self, revision_id):
         self.loads.append(("revision", revision_id))
         return self.revision_values[revision_id]
+
+    def write_version(self, version_id, data):
+        self.writes.append(("version", version_id, data))
+        self.data_values[version_id] = data
+
+    def write_revision(self, revision_id, details):
+        self.writes.append(("revision", revision_id, details))
+        self.revision_values[revision_id] = details
+
+    def write_latest(self, data_id, details):
+        self.writes.append(("latest", data_id, details))
+        self.latest_values[data_id] = (data_id, *details.revision)
 
 
 class DataCacheTests(unittest.TestCase):
