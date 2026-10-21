@@ -11,15 +11,40 @@ from test_data_cache import MemoryDataCache
 
 
 class DataCacheWriteTests(unittest.TestCase):
+    def test_revision_timestamp_is_readable_without_stored_table(self):
+        writer = MemoryDataCache()
+        as_of = datetime(2026, 10, 21, 12, 34, 56, 123456, tzinfo=UTC)
+        _, update = writer.write(table({"price": [10]}), id="prices", as_of=as_of)
+        revision_id = (update.id, *update.revision)
+        reader = MemoryDataCache()
+        reader.revision_values = writer.revision_values.copy()
+        with patch.object(reader, "load_version", side_effect=AssertionError("Table must not be loaded")):
+            self.assertEqual(reader.get_revision(revision_id).as_of, as_of)
+            self.assertEqual(reader.peek_revision(revision_id).as_of, as_of)
+        self.assertEqual(reader.loads, [("revision", revision_id)])
+
+    def test_update_preserves_timestamp_without_loading_table(self):
+        cache = MemoryDataCache()
+        for count in (0, 1):
+            with self.subTest(count=count):
+                as_of = datetime(2026, 10, 21, 12, count, tzinfo=UTC)
+                update = DataUpdateDetails(
+                    id="prices", revision=(7, count), previous_revision=None,
+                    dependencies=(), weak_dependencies=(), as_of=as_of,
+                )
+                cache.apply_update(update)
+                self.assertEqual(cache.get_revision(("prices", 7, count)).as_of, as_of)
+        self.assertEqual(cache.loads, [])
+
     def test_peeks_observe_written_empty_tables_and_metadata_without_loading(self):
         cache = MemoryDataCache()
-        written, update = cache.write(table({"price": []}), id="prices",
-                                      as_of=datetime(1970, 1, 1, tzinfo=UTC))
+        as_of = datetime(1970, 1, 1, tzinfo=UTC)
+        written, update = cache.write(table({"price": []}), id="prices", as_of=as_of)
         cache.loads.clear()
         self.assertIs(cache.peek_version(("prices", 0)), written)
         self.assertEqual(cache.peek_latest("prices"), ("prices", 0, 0))
         self.assertEqual(cache.peek_latest_revision(("prices", 0)), ("prices", 0, 0))
-        self.assertEqual(cache.peek_revision(("prices", 0, 0)), DataRevisionDetails((), (), None))
+        self.assertEqual(cache.peek_revision(("prices", 0, 0)), DataRevisionDetails((), (), None, as_of=as_of))
         self.assertIsNone(cache.peek_version(("other", 0)))
         self.assertIsNone(cache.peek_version(("prices", 1)))
         self.assertEqual(cache.loads, [])
@@ -36,19 +61,19 @@ class DataCacheWriteTests(unittest.TestCase):
         self.assertTrue(written.equals(original))
         self.assertEqual(original.schema.metadata, {b"custom": b"\xff\x00"})
         expected = DataUpdateDetails(id="prices", revision=(1234, 0), previous_revision=None,
-                                     dependencies=(), weak_dependencies=())
+                                     dependencies=(), weak_dependencies=(), as_of=as_of)
         self.assertEqual(update, expected)
         self.assertEqual([entry[:2] for entry in cache.writes], [
             ("version", ("prices", 1234)), ("revision", ("prices", 1234, 0)), ("latest", "prices"),
         ])
         self.assertIs(cache.writes[0][2], written)
-        self.assertEqual(cache.writes[1][2], DataRevisionDetails((), (), None))
+        self.assertEqual(cache.writes[1][2], DataRevisionDetails((), (), None, as_of=as_of))
         self.assertEqual(cache.writes[2][2], LatestDataDetails((1234, 0)))
         cache.loads.clear()
         self.assertIs(cache.get_version(("prices", 1234)), written)
         self.assertEqual(cache.latest("prices"), ("prices", 1234, 0))
         self.assertEqual(cache.get_latest_revision(("prices", 1234)), ("prices", 1234, 0))
-        self.assertEqual(cache.get_revision(("prices", 1234, 0)), DataRevisionDetails((), (), None))
+        self.assertEqual(cache.get_revision(("prices", 1234, 0)), DataRevisionDetails((), (), None, as_of=as_of))
         self.assertEqual(cache.loads, [])
 
     def test_table_metadata_supplies_id_version_and_as_of(self):
@@ -56,6 +81,7 @@ class DataCacheWriteTests(unittest.TestCase):
                     b"as_of": b"2026-10-21T12:00:00+04:00", b"custom": b"keep"}
         written, update = MemoryDataCache().write(table({"price": []}, metadata=metadata))
         self.assertEqual(written.schema.metadata, metadata)
+        self.assertEqual(update.as_of, datetime.fromisoformat(metadata[b"as_of"].decode()))
         self.assertEqual(update.id, "pricés")
         self.assertEqual(update.revision, (7, 0))  # Supplied version outranks as_of-derived version.
 
@@ -71,7 +97,7 @@ class DataCacheWriteTests(unittest.TestCase):
             b"id": b"new-id", b"version": b"7", b"as_of": b"1970-01-02T00:00:00+00:00",
         })
         self.assertEqual(update, DataUpdateDetails(
-            id="new-id", revision=(7, 0), previous_revision=None,
+            id="new-id", revision=(7, 0), previous_revision=None, as_of=as_of,
             dependencies=(("source", 100),), weak_dependencies=(("reference", 200),),
         ))
         self.assertEqual(cache.loads, [("latest", "new-id")])
@@ -93,6 +119,7 @@ class DataCacheWriteTests(unittest.TestCase):
                         table({"price": [10]}, metadata=metadata),
                         as_of=None if metadata_time else as_of,
                     )
+                    self.assertEqual(update.as_of, as_of)
                     self.assertEqual(update.revision, (expected, 0))
                     self.assertEqual(written.schema.metadata[b"version"], str(expected).encode())
                     self.assertEqual(written.schema.metadata[b"as_of"], as_of.isoformat().encode())
@@ -108,6 +135,7 @@ class DataCacheWriteTests(unittest.TestCase):
                     clock.now.return_value = now
                     written, update = MemoryDataCache().write(table({"price": [10]}, metadata=metadata))
                     clock.now.assert_called_once_with(UTC)
+                self.assertEqual(update.as_of, now)
                 self.assertEqual(written.schema.metadata[b"as_of"], now.isoformat().encode())
                 self.assertEqual(update.revision, (1234 if version is None else 7, 0))
 
@@ -126,6 +154,8 @@ class DataCacheWriteTests(unittest.TestCase):
                 written, update = cache.write(table({"price": [20]}, metadata=metadata), id="prices", as_of=as_of)
                 expected = max(1001, candidate)
                 self.assertEqual(update.revision, (expected, 0))
+                self.assertEqual(update.as_of, as_of)
+                self.assertEqual(cache.get_revision(("prices", expected, 0)).as_of, as_of)
                 self.assertEqual(update.previous_revision, (1000, 17))
                 self.assertEqual(written.schema.metadata[b"version"], str(expected).encode())
                 self.assertEqual(written.schema.metadata[b"as_of"], as_of.isoformat().encode())

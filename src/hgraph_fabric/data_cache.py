@@ -109,6 +109,7 @@ class DataCache(ABC):
             dependencies=dependencies,
             weak_dependencies=weak_dependencies,
             previous_revision=previous[1:] if previous is not None else None,
+            as_of=as_of,
         )
         self.write_version((id, version), data)
         self.write_revision(revision_id, details)
@@ -117,6 +118,7 @@ class DataCache(ABC):
         update = DataUpdateDetails(
             id=id, revision=(version, 0), previous_revision=details.previous_revision,
             dependencies=dependencies, weak_dependencies=weak_dependencies,
+            as_of=as_of,
         )
         self._data[(id, version)] = data
         self.apply_update(update)
@@ -168,6 +170,7 @@ class DataCache(ABC):
             dependencies=update.dependencies,
             weak_dependencies=update.weak_dependencies,
             previous_revision=update.previous_revision,
+            as_of=update.as_of,
         )
         self._latest_revisions[revision_id[:2]] = revision_id
 

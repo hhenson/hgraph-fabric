@@ -1,4 +1,5 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 
 
 type DataNamespace = str
@@ -25,6 +26,8 @@ class DataRevisionDetails:
     dependencies: tuple[DataVersionId, ...] | None
     weak_dependencies: tuple[DataVersionId, ...] | None
     previous_revision: DataRevision | None
+    # Older revision records may not carry a timestamp.
+    as_of: datetime | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
