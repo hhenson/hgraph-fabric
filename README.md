@@ -34,6 +34,10 @@ Failed searches or tree loads leave current intact.
 Cache writes and notifications to every associated subscription manager are
 coordinated. Deliver an update to all associated managers before starting another
 cut operation or reading trees between those notifications.
+The cache's known latest revision and latest revision per version only advance.
+An older local notification still supplies its revision metadata, but cannot
+lower the publication head and cause a subsequent write to reuse a version.
+Subscription selections continue to be managed separately by the manager.
 
 `apply_update(update)` always updates the cache. An update for a subscribed
 data ID changes that subscription's latest revision and attempts advancement.

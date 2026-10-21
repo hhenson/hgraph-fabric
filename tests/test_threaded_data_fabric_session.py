@@ -144,6 +144,66 @@ class ThreadedSessionTests(unittest.TestCase):
                 self.assertEqual(update.id, "output")
                 self.assertEqual(written["value"][0].as_py(), 42)
 
+    def test_interleaved_local_echo_cannot_reuse_a_published_version(self):
+        def write(cache, version, value):
+            return cache.write(
+                table({"value": [value]}, metadata={b"version": str(version).encode()}),
+                id="input", as_of=AS_OF,
+            )
+        write(self.cache, 0, 0)
+        remote = MemoryDataCache()
+        remote.latest_values = self.cache.latest_values
+        remote.revision_values = self.cache.revision_values
+        remote.data_values = self.cache.data_values
+        _, input1 = write(remote, 10, 1)
+        _, input2 = write(remote, 20, 2)
+
+        class InterleavedTransport(LoopbackTransport):
+            def send(self, update):
+                super().send(update)
+                if update.id == "output" and update.revision[0] == 1:
+                    self.messages.put(input2)
+
+        transport = InterleavedTransport()
+        initialized = Event()
+        completed = Event()
+        updates = []
+        def emit(publish, value, dependency):
+            _, update = publish(
+                table({"value": [value]}, metadata={b"version": b"1"}),
+                id="output", dependencies=(("input", dependency),), as_of=AS_OF,
+            )
+            updates.append(update)
+        def callback(changes, publish):
+            value = changes["input"]["value"][0].as_py()
+            if value == 0:
+                initialized.set()
+            elif value == 1:
+                emit(publish, 11, 10)
+                emit(publish, 12, 10)
+            else:
+                emit(publish, 21, 20)
+                completed.set()
+
+        with run_data_fabric_session(
+            self.cache, transport, callback, subscriptions=["input"], poll_interval=0.01,
+        ):
+            self.assertTrue(initialized.wait(2))
+            # FIFO delivery is output@1, input@20, output@2. The input callback
+            # publishes again after the first echo, while output@2 already exists.
+            transport.messages.put(input1)
+            self.assertTrue(completed.wait(2))
+
+        self.assertEqual([update.revision for update in updates], [(1, 0), (2, 0), (3, 0)])
+        self.assertEqual([update.previous_revision for update in updates], [None, (1, 0), (2, 0)])
+        self.assertEqual(self.cache.latest("output"), ("output", 3, 0))
+        self.assertEqual(self.cache.latest_values["output"], ("output", 3, 0))
+        for version, value, dependency in ((1, 11, 10), (2, 12, 10), (3, 21, 20)):
+            self.assertEqual(self.cache.get_version(("output", version))["value"][0].as_py(), value)
+            self.assertEqual(self.cache.data_values[("output", version)]["value"][0].as_py(), value)
+            self.assertEqual(self.cache.revision_values[("output", version, 0)].dependencies,
+                             (("input", dependency),))
+
     def test_shutdown_allows_in_flight_callback_to_finish_publishing(self):
         self.seed()
         initial = Event()
