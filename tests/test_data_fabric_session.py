@@ -203,6 +203,44 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         self.assertEqual(self.session.poll(0), {})
         self.transport.poll.assert_called_once_with(0)
 
+    def test_unavailable_initial_cut_receives_update_that_aligns_roots(self):
+        publisher = DataFabricSession(self.cache)
+        publish(publisher, "x", 1)
+        publish(publisher, "x", 2)
+        publish(publisher, "a", 100, (("x", 1),))
+        b, _ = publish(publisher, "b", 100, (("x", 2),))
+        self.session.add_subscriptions(["a", "b"])
+        a, update = publish(publisher, "a", 200, (("x", 2),))
+        self.transport.poll.return_value = update
+        result = self.session.poll(0)
+        self.assertIs(result["a"], a)
+        self.assertIs(result["b"], b)
+        self.transport.poll.assert_called_once_with(0)
+
+    def test_unavailable_initial_cut_uses_remaining_timeout(self):
+        publisher = DataFabricSession(self.cache)
+        publish(publisher, "x", 1)
+        publish(publisher, "x", 2)
+        publish(publisher, "a", 100, (("x", 1),))
+        publish(publisher, "b", 100, (("x", 2),))
+        self.session.add_subscriptions(["a", "b"])
+        self.transport.poll.return_value = None
+        with patch("hgraph_fabric.data_fabric_session.monotonic", side_effect=[10.0, 10.25]):
+            self.assertEqual(self.session.poll(1.0), {})
+        self.transport.poll.assert_called_once_with(0.75)
+        self.assertIsNone(self.session.add_subscription("a").current_revision)
+        self.assertIsNone(self.session.add_subscription("b").current_revision)
+
+    def test_initialization_storage_failure_is_not_treated_as_unavailable_cut(self):
+        publish(DataFabricSession(self.cache), "a", 100)
+        self.session.add_subscription("a")
+        error = OSError("Storage unavailable")
+        with patch.object(self.cache, "get_version", side_effect=error):
+            with self.assertRaises(OSError) as failure:
+                self.session.poll(0)
+        self.assertIs(failure.exception, error)
+        self.transport.poll.assert_not_called()
+
     def test_context_manager_stops_without_suppressing_exception(self):
         error = RuntimeError("Processing failed")
         with self.assertRaises(RuntimeError) as raised:

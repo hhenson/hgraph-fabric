@@ -167,6 +167,9 @@ If any registered subscription has no current revision, `poll` first initializes
 and returns the full consistent cut without receiving a message. This also applies
 to subscriptions added after polling has begun; the whole cut is returned because
 adding a root can change the versions selected for existing roots.
+If no initial consistent cut is available, polling continues receiving within
+the remaining timeout so a later publication can establish it. Storage and
+malformed metadata errors still propagate.
 `poll` receives and applies notifications until subscribed data advances or its
 timeout expires. It returns the advanced tables, or `{}` on expiry. Timeouts are
 seconds and cover the whole call, including notifications that yield no changes;

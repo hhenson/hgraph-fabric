@@ -6,6 +6,7 @@ from typing import Protocol, Self
 
 from pyarrow import Table
 
+from .consistent_cut import NoConsistentCutError
 from .data_cache import DataCache
 from .data_structures import DataId, DataUpdateDetails, DataVersionId
 from .data_subscription_graph import DataSubscriptionGraph
@@ -107,10 +108,16 @@ class PollingDataFabricSession(DataFabricSession):
         """
         if timeout is not None and timeout < 0:
             raise ValueError("Timeout must be nonnegative")
-        if not self._subscriptions.is_initialized:
-            return self.get_consistent_cut()
         deadline = None if timeout is None else monotonic() + timeout
         remaining = timeout
+        if not self._subscriptions.is_initialized:
+            try:
+                return self.get_consistent_cut()
+            except NoConsistentCutError:
+                # A later publication can establish the first cut. Missing or
+                # malformed metadata still propagates as a processing error.
+                if deadline is not None:
+                    remaining = max(0.0, deadline - monotonic())
         while True:
             update = self._transport.poll(remaining)
             if update is None:
