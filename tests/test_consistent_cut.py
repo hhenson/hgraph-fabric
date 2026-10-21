@@ -64,22 +64,20 @@ class ConsistentCutTests(unittest.TestCase):
                    if args[0][0] == "a"]
         self.assertIn(("a", 9000, 0), a_loads)
         self.assertIn(("a", 1000, 15), a_loads)
-        self.assertFalse(any(0 < revision[2] < 8 for revision in a_loads
-                             if revision[1] == 9000))
         self.assertTrue(all(revision[1] in (1000, 9000) for revision in a_loads))
         self.assertEqual(b.latest_revision, expected[1])
         self.assertEqual(a.proposed_revision, a.latest_revision)
         self.assertEqual(b.proposed_revision, b.latest_revision)
 
-    def test_matching_first_node_can_require_moving_forward_for_another(self):
-        # At count 1, x matches but y lags. Search forward inside the same
-        # version to count 2; do not move the fixed subscription backwards.
+    def test_exact_match_must_include_every_common_node(self):
+        # Count 1 matches x but not y. Choose count 2, which matches both,
+        # and keep the fixed subscription unchanged.
         for count, (x, y) in enumerate(((0, 0), (1, 0), (1, 1), (2, 1))):
             self.record("a", 100, count, (("x", x), ("y", y)))
         a = self.subscription(("a", 100, 3))
         b = self.subscription(self.record("b", 200, dependencies=(("x", 1), ("y", 1))))
         self.assertEqual(find_consistent_cut(a, b, self.cache), (("a", 100, 2), ("b", 200, 0)))
-        self.assertIn(call(("a", 100, 1)), self.cache.get_revision.call_args_list)
+        self.assertNotIn(call(("a", 100, 1)), self.cache.get_revision.call_args_list)
 
     def test_matching_first_node_can_require_moving_backward_for_another(self):
         values = ((0, 0), (1, 0), (1, 1), (1, 2), (2, 2), (2, 3), (2, 4))
@@ -232,7 +230,7 @@ class ConsistentCutTests(unittest.TestCase):
             find_consistent_cut(a, b, self.cache)
         self.assertEqual((a.proposed_revision, b.proposed_revision), before)
 
-    def test_monotonic_revision_range_uses_binary_probes(self):
+    def test_newest_exact_match_returns_without_reading_older_counts(self):
         for count in range(128):
             self.record("a", 1000, count, (("x", count),))
         a = self.subscription(("a", 1000, 127))
@@ -240,7 +238,7 @@ class ConsistentCutTests(unittest.TestCase):
         self.assertEqual(find_consistent_cut(a, b, self.cache), (("a", 1000, 20), ("b", 2000, 0)))
         loads = [args[0] for args, _ in self.cache.get_revision.call_args_list
                  if args[0][0] == "a"]
-        self.assertLessEqual(len(loads), 12)
+        self.assertEqual(set(loads), {("a", 1000, count) for count in range(20, 128)})
 
     def test_missing_selection_raises(self):
         a = self.subscription(self.record("a", 100))

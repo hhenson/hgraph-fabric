@@ -19,7 +19,22 @@ The original four review reproductions are ordinary passing regressions. The
 [second conflict-tracker review](CONFLICT_TRACKER_REVIEW.md) now covers conflict-path
 wakeups and cleanup with passing regressions. Retry-after-error findings were
 withdrawn: unexpected failures are fatal. Shared-cache delivery follows the
-coordinated contract. Neither suite retains expected failures.
+coordinated contract. Those original findings have no remaining expected failures.
+
+The [deep transition review](DEEP_TRANSITION_REVIEW.md) adds 13,032 publication
+steps and bounded pair searches. Its ordering finding is now addressed: the
+search visits revisions newest first, returns an exact match immediately, and
+retains the newest consistent omission only after ruling out every exact match.
+The two reproductions pass, along with 2,916 additional refreshed-history cases.
+The [containment transition review](CONTAINMENT_TRANSITION_REVIEW.md) adds changing
+topologies and candidate-specific containment cases. Its inconsistent omission
+acceptance and missed historical containment matches are now addressed by a
+shared candidate comparison in both search paths.
+
+The [mixed-role review](MIXED_ROLE_REVIEW.md) adds 13,440 generated updates,
+3,072 bounded pair comparisons against exhaustive candidate sets, and late
+subscription cases. No new defect was reproduced. The full suite has 164 passing
+tests with no expected failures; the strict adversarial runner has 57 passing tests.
 
 ## Passing scenario matrix
 
@@ -35,9 +50,8 @@ coordinated contract. Neither suite retains expected failures.
 | **Total** | **41,120** | Scenarios, not 37,520 distinct topology shapes |
 
 The live-stream cases check every update and its duplicate, not just the final
-cut. An additional fault-injection test fails each metadata-read position of a
-history search in turn, verifies committed selections and retained current
-objects survive, then retries successfully.
+cut. Fatal metadata-error tests check propagation and that no new current
+selection is published; they do not require retry or recovery after an error.
 
 `adversarial_cases.py` contains the independent oracle. It walks raw metadata,
 scans version-specific revision records and checks pair compatibility without

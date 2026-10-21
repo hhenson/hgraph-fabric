@@ -13,8 +13,9 @@ root versions or revision counts, and dependency advancement or omission. It
 checks the returned versions, committed cuts against the raw-record oracle,
 reverse-index contents, tracker cleanup and duplicate suppression.
 
-The full suite contains 140 passing tests, with no expected failures. The
-strict adversarial runner also passes. Run after installing the project:
+At the completion of this review, the suite contained 140 passing tests with no
+expected failures. The later [deep transition review](DEEP_TRANSITION_REVIEW.md)
+adds coverage and documents a separate count-search ordering finding. Run after installing the project:
 
 ```sh
 python -I -m unittest discover -s tests
