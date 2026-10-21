@@ -1,9 +1,4 @@
-"""Review reproductions: resolved cases pass; open cases are expected failures.
-
-The open cases assert the stated behavior under the assumptions in ADVERSARIAL.md.
-Run strictly (without expectedFailure wrappers) to expose their exceptions and
-assertions. The crossed-history case now exercises the defensive fallback.
-"""
+"""The four original adversarial review findings, now passing regressions."""
 import unittest
 
 from hgraph_fabric.data_subscription_manager import DataSubscriptionManager
@@ -43,7 +38,6 @@ class AdversarialKnownGaps(unittest.TestCase):
             manager.apply_update(update)
         self.assertEqual(current_cut(manager), before)
 
-    @unittest.expectedFailure
     def test_same_revision_cut_is_independent_of_retained_tree_cache(self):
         history = History()
         history.add("x", 1)

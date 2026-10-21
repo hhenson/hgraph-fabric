@@ -16,7 +16,10 @@ builds and retains full strong-dependency graphs breadth first, using the cache'
 latest-revision lookup for each specific dependency version. Each subscription
 tracks `latest_revision`, `proposed_revision` and `current_revision` independently.
 `proposed_graph(cache)` loads the proposed tree without pruning retained history;
-weak dependencies are excluded.
+weak dependencies are excluded. Retained trees record the exact dependency
+revisions used to build them. Reuse checks those revisions, so the same root
+revision can refresh its ancestors when a referenced version gets a newer count.
+The explicit root revision and dependency data versions stay pinned.
 `DataSubscriptionManager(cache)` registers roots with `add_subscription(data_id)`
 or `add_subscriptions(data_ids)`, loading their latest trees.
 
@@ -28,8 +31,24 @@ consistent are proposals copied to current. Before committing, every proposed
 full tree is loaded, including a single subscription with no pair comparisons.
 Failed searches or tree loads leave current intact.
 
-`apply_update(update)` always updates the cache. Only an update for a subscribed
-data ID changes that subscription's latest revision and triggers recalculation.
+`apply_update(update)` always updates the cache. An update for a subscribed
+data ID changes that subscription's latest revision and attempts advancement.
+For dependency updates, the manager indexes current and latest trees by exact
+`DataVersionId`, and refreshes affected trees. A conflict tracker records versions
+on paths to mismatched nodes when comparisons downgrade proposals or cannot find
+a bounded cut. An intermediate version is tracked too: its next revision may
+change the conflicting dependency.
+
+An unsubscribed dependency update attempts advancement only if that exact version
+has a recorded conflict, at least two subscriptions depend on it, and an affected
+subscription is behind latest. Unrelated branches, other data versions and
+duplicate notifications do not trigger searches. A still-blocked root does not
+prevent another affected root from driving a retry. One complete proposed cut is
+committed per notification; tracker entries are removed as roots reach latest.
+
+Tree refresh and cut advancement are separate. When the gate skips a search,
+root selections stay unchanged; refreshed current trees are marked for comparison
+at the next resolution, rather than assumed consistent from earlier checks.
 With an established cut, it sets proposals to latest and first compares the
 updated item against every other item, rechecking earlier matches if its proposal
 changes. If that proposal drops to its committed current (or below), it stops
@@ -39,8 +58,8 @@ search bounds: an exact match below current cannot displace a valid omission
 at current. Bounds apply to both version IDs and revision counts.
 
 If the updated item can advance, it and the unchanged peers form the stable set.
-Other improved peers are inserted one at a time, propagating invalidated pair
-comparisons. The same early-stop rule applies during this second stage. Only a
+Other improved peers and peers whose current trees were refreshed are inserted
+one at a time, propagating invalidated pair comparisons. The same early-stop rule applies during this second stage. Only a
 complete consistent proposal is committed; current selections and their retained
 graphs remain available throughout the search. Without a validated existing cut,
 it constructs the full proposed cut first.

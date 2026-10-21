@@ -1,9 +1,9 @@
 # Adversarial stabilisation review
 
 Original reviewed implementation: `b50c01d` (the proposed-cut and affected-item
-update algorithm). Findings 1, 2 and 4 are addressed by a joint-history fallback,
-commit-time tree validation, and committed-current search bounds respectively.
-Finding 3 remains open pending dependency-refresh semantics.
+update algorithm). All four reproduced findings are now addressed: joint-history
+fallback, commit-time tree validation, dependency refresh with conflict tracking,
+and committed-current search bounds.
 
 ## Run
 
@@ -15,11 +15,9 @@ python -I tests/run_adversarial.py
 python -I tests/run_adversarial.py --strict
 ```
 
-The first two commands include one explicitly labelled `expectedFailure` test.
-They do **not** mean the implementation has no defects. The strict command removes
-that designation and exits unsuccessfully, exposing the remaining retained-tree failure.
-An unexpected success in the normal suite fails the run so a repaired finding
-must have its expected-failure designation removed.
+All review reproductions are ordinary passing regressions. There are no remaining
+`expectedFailure` tests. The strict command remains available to expose any future
+explicitly expected failures without their wrappers.
 
 ## Passing scenario matrix
 
@@ -48,7 +46,7 @@ ignores weak dependencies, and honours the agreed root-containment shortcut.
 It does not require order-independent answers where several valid cuts exist.
 
 Assertions cover consistency, proposal ceilings, forward-only committed updates,
-exact returned DataVersionIds, duplicate delivery, cache-only unsubscribed
+exact returned DataVersionIds, duplicate delivery, cache-only unrelated-version
 updates, unchanged cut when the driving item cannot advance, eventual convergence
 in the generated complete histories, and avoiding dataframe loads.
 
@@ -94,7 +92,7 @@ when there are no inter-subscription constraints to compare.
 Location: [`data_subscription_manager.py`](../src/hgraph_fabric/data_subscription_manager.py#L71).
 Reproduction: `test_single_subscription_does_not_commit_unloadable_tree`.
 
-### 3. Retained trees make cut results depend on cache history (snapshot semantics)
+### 3. Retained trees make cut results depend on cache history (addressed)
 
 A retained root revision references `middle@100`; the middle's revision count
 then advances from dependencies `x@1` to `x@2` without changing its data version.
@@ -103,14 +101,25 @@ count, while the retained tree still contains `x@1`. Adding a peer consuming
 `x@2` succeeds with a fresh manager but raises `LookupError` with the warmed one,
 despite identical final metadata and identical root revision IDs.
 
-This case intentionally leaves the root's own revision unchanged after the
-middle revision advances. It demonstrates different expansion results, not
-corrupt dataframe contents. A rule requiring a corresponding root revision
-before further resolution would need to be explicit in the test contract.
+The root remains unchanged while the dependency count advances. Retained graphs
+now record the exact dependency revisions used during expansion and refresh when
+those version-scoped latest counts change. Current and latest subscription trees
+are reverse-indexed by dependency version; only affected trees are refreshed on
+a notification. Historical search trees also check freshness on reuse.
 
-The tree key includes only the root revision, but expansion depends on mutable
-latest-count lookups for descendants. The design needs explicit snapshot or
-invalidation semantics; this review does not choose between them.
+When a comparison downgrades a proposal or finds no bounded cut, the manager
+tracks versions on the paths to mismatched nodes, respecting root containment.
+An unsubscribed dependency update retries resolution only for a tracked conflict
+with at least two dependent subscriptions and at least one affected root behind
+latest. New data versions, unrelated branches and duplicates do not wake searches.
+Entries are removed as waiting roots catch up.
+
+`test_dependency_refresh.py` covers direct and nested conflict paths in every
+registration order, skip conditions, index additions/removals, count-only
+advancement, blocked-driver fallback, failure/retry, historical graph freshness,
+and rechecking refreshed current trees at the next resolution. The gate controls
+search, not refresh: it can leave root selections unchanged without certifying
+that their newly refreshed trees are mutually consistent until resolution runs.
 
 Location: [`data_subscription_graph.py`](../src/hgraph_fabric/data_subscription_graph.py#L60).
 Reproduction: `test_same_revision_cut_is_independent_of_retained_tree_cache`.
