@@ -51,6 +51,22 @@ class DataSubscriptionGraphTests(unittest.TestCase):
         })
         self.assertIs(subscription.current(cache), graphs[revision_ids[-1]])
 
+    def test_proposed_graph_keeps_current_and_history_until_committed(self):
+        subscription = DataSubscriptionGraph("prices")
+        cache = Mock(spec=DataCache)
+        cache.get_revision.return_value = DataRevisionDetails(None, None, None)
+        first, second = ("prices", 100, 0), ("prices", 200, 0)
+        subscription.current_revision = first
+        current_graph = subscription.current(cache)
+        subscription.proposed_revision = second
+        proposed_graph = subscription.proposed_graph(cache)
+        self.assertIs(subscription.proposed_graph(cache), proposed_graph)
+        self.assertEqual(subscription.current_revision, first)
+        self.assertIs(subscription.current(cache), current_graph)
+        subscription.current_revision = subscription.proposed_revision
+        self.assertIs(subscription.current(cache), proposed_graph)
+        self.assertNotIn(first, subscription._revision_graphs)
+
     def test_clearing_current_retains_cached_graphs(self):
         cache = Mock(spec=DataCache)
         subscription = DataSubscriptionGraph("prices")
@@ -78,7 +94,7 @@ class DataSubscriptionGraphTests(unittest.TestCase):
     def test_unselected_revisions_raise_without_loading(self):
         subscription = DataSubscriptionGraph("prices")
         cache = Mock(spec=DataCache)
-        for accessor in (subscription.latest, subscription.current):
+        for accessor in (subscription.latest, subscription.current, subscription.proposed_graph):
             with self.assertRaises(LookupError):
                 accessor(cache)
         self.assertEqual(cache.mock_calls, [])

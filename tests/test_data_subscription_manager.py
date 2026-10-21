@@ -166,7 +166,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             if right.data_id == "d":
                 for data_id in ("a", "b", "c"):
                     self.assertEqual(
-                        self.manager._subscriptions[data_id].current_revision, (data_id, 100, 0)
+                        self.manager._subscriptions[data_id].proposed_revision, (data_id, 100, 0)
                     )
             return find_consistent_cut(left, right, cache)
 
@@ -207,7 +207,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             [("a", "b"), ("a", "c"), ("b", "c"), ("a", "d"), ("b", "d"), ("c", "d")],
         )
 
-    def test_every_run_initializes_all_currents_before_comparing(self):
+    def test_initialization_uses_proposals_and_keeps_current_until_commit(self):
         self.add_revision("source", 1)
         for data_id in ("a", "b", "c"):
             self.add_revision(data_id, 100, dependencies=(("source", 1),))
@@ -217,7 +217,8 @@ class DataSubscriptionManagerTests(unittest.TestCase):
 
         def compare(left, right, cache):
             for subscription in self.manager._subscriptions.values():
-                self.assertEqual(subscription.current_revision, subscription.latest_revision)
+                self.assertEqual(subscription.proposed_revision, subscription.latest_revision)
+                self.assertEqual(subscription.current_revision, (subscription.data_id, 1, 0))
             return find_consistent_cut(left, right, cache)
 
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
@@ -244,7 +245,8 @@ class DataSubscriptionManagerTests(unittest.TestCase):
 
         def compare(left, right, cache):
             if right.data_id == "c":
-                self.assertEqual(a.current_revision, ("a", 100, 0))
+                self.assertEqual(a.proposed_revision, ("a", 100, 0))
+                self.assertEqual(a.current_revision, ("a", 100, 1))
                 raise OSError("Unavailable history")
             return find_consistent_cut(left, right, cache)
 

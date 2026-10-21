@@ -13,8 +13,8 @@ def find_consistent_cut(
 ) -> tuple[DataRevisionId, DataRevisionId]:
     """Return consistent (left revision, right revision), in argument order.
 
-    Start from each subscription's current_revision. The caller initializes
-    current to latest before a tournament and applies returned pairs between
+    Start from each subscription's proposed_revision. The caller initializes
+    proposed to latest before a search and applies returned pairs between
     comparisons; this function never resets a selection to latest.
 
     If one subscription's root occurs in the other tree, only that root's
@@ -28,15 +28,15 @@ def find_consistent_cut(
     remains a dependency, both subscriptions record its changes and its
     versions advance monotonically. Raise LookupError if no alignment exists.
 
-    Trees loaded during the search are cached normally. Neither subscription's
-    latest_revision nor current_revision is changed; the caller can apply the
+    Trees loaded during the search are cached normally. No latest, proposed or
+    current selection is changed; the caller can apply the
     returned revisions after reviewing or combining the result.
     """
-    if left.current_revision is None or right.current_revision is None:
-        raise LookupError("Both subscriptions need a current revision")
+    if left.proposed_revision is None or right.proposed_revision is None:
+        raise LookupError("Both subscriptions need a proposed revision")
 
-    left_revision, right_revision = left.current_revision, right.current_revision
-    left_graph, right_graph = left.current(cache), right.current(cache)
+    left_revision, right_revision = left.proposed_revision, right.proposed_revision
+    left_graph, right_graph = left.proposed_graph(cache), right.proposed_graph(cache)
 
     # Containment is stronger than ordinary overlap. Matching the contained
     # root's version covers its entire subtree, so do not compare descendants.
@@ -132,7 +132,7 @@ def find_consistent_cut(
             return leading.data_id, version, middle
         return exact_revision(version, low, middle - 1)
 
-    # 3. The selected current count is the initial upper bound, even if newer
+    # 3. The selected proposed count is the initial upper bound, even if newer
     #    revisions exist. Establish bounds using that count and revision zero.
     #    If zero still leads, walk its previous_revision pointer. That pointer
     #    supplies BOTH the actual previous version and its maximum count.

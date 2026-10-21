@@ -26,15 +26,19 @@ class ConsistentCutTests(unittest.TestCase):
     def subscription(self, revision):
         subscription = DataSubscriptionGraph(revision[0])
         subscription.latest_revision = revision
-        subscription.current_revision = revision
+        subscription.proposed_revision = revision
         return subscription
 
-    def test_compatible_current_trees_return_the_original_revision_pair(self):
+    def test_compatible_proposed_trees_return_the_original_revision_pair(self):
         a = self.subscription(self.record("a", 10, dependencies=(("x", 7),)))
         b = self.subscription(self.record("b", 20, dependencies=(("x", 7),)))
+        a.current_revision = ("a", 1, 0)
+        b.current_revision = ("b", 2, 0)
         self.assertEqual(find_consistent_cut(a, b, self.cache), (("a", 10, 0), ("b", 20, 0)))
-        self.assertEqual(a.current_revision, a.latest_revision)
-        self.assertEqual(b.current_revision, b.latest_revision)
+        self.assertEqual(a.proposed_revision, a.latest_revision)
+        self.assertEqual(b.proposed_revision, b.latest_revision)
+        self.assertEqual(a.current_revision, ("a", 1, 0))
+        self.assertEqual(b.current_revision, ("b", 2, 0))
 
     def test_disjoint_leaf_roots_need_no_history_search(self):
         a = self.subscription(self.record("a", 10))
@@ -64,8 +68,8 @@ class ConsistentCutTests(unittest.TestCase):
                              if revision[1] == 9000))
         self.assertTrue(all(revision[1] in (1000, 9000) for revision in a_loads))
         self.assertEqual(b.latest_revision, expected[1])
-        self.assertEqual(a.current_revision, a.latest_revision)
-        self.assertEqual(b.current_revision, b.latest_revision)
+        self.assertEqual(a.proposed_revision, a.latest_revision)
+        self.assertEqual(b.proposed_revision, b.latest_revision)
 
     def test_matching_first_node_can_require_moving_forward_for_another(self):
         # At count 1, x matches but y lags. Search forward inside the same
@@ -128,16 +132,16 @@ class ConsistentCutTests(unittest.TestCase):
         x = self.subscription(current)
         a = self.subscription(self.record("a", 500, dependencies=(("x", 100),)))
         # No revision-zero record for x=9000 is available or needed here.
-        self.assertEqual(find_consistent_cut(x, a, self.cache), (historical, a.current_revision))
-        self.assertEqual(find_consistent_cut(a, x, self.cache), (a.current_revision, historical))
+        self.assertEqual(find_consistent_cut(x, a, self.cache), (historical, a.proposed_revision))
+        self.assertEqual(find_consistent_cut(a, x, self.cache), (a.proposed_revision, historical))
         self.assertNotIn(call(("x", 9000, 0)), self.cache.get_revision.call_args_list)
-        self.assertEqual(x.current_revision, current)
+        self.assertEqual(x.proposed_revision, current)
 
     def test_unrelated_leaf_requires_no_adjustment(self):
         x = self.subscription(self.record("x", 100))
         a = self.subscription(self.record("a", 500, dependencies=(("y", 200),)))
         self.assertEqual(
-            find_consistent_cut(x, a, self.cache), (x.current_revision, a.current_revision)
+            find_consistent_cut(x, a, self.cache), (x.proposed_revision, a.proposed_revision)
         )
         self.assertEqual(self.cache.get_latest_revision.call_args_list, [call(("y", 200))])
 
@@ -152,9 +156,9 @@ class ConsistentCutTests(unittest.TestCase):
             with self.subTest(left=left.data_id):
                 self.assertEqual(
                     find_consistent_cut(left, right, self.cache),
-                    (left.current_revision, right.current_revision),
+                    (left.proposed_revision, right.proposed_revision),
                 )
-        self.assertEqual(middle.current_revision, ("middle", 100, 0))
+        self.assertEqual(middle.proposed_revision, ("middle", 100, 0))
 
     def test_newer_contained_root_is_resolved_directly(self):
         historical = self.record("middle", 100, 7, (("a_source", 1),))
@@ -165,14 +169,14 @@ class ConsistentCutTests(unittest.TestCase):
         # No revision-zero header for middle=9000 is required by this shortcut.
         self.assertEqual(
             find_consistent_cut(middle, parent, self.cache),
-            (historical, parent.current_revision),
+            (historical, parent.proposed_revision),
         )
         self.assertEqual(
             find_consistent_cut(parent, middle, self.cache),
-            (parent.current_revision, historical),
+            (parent.proposed_revision, historical),
         )
         self.assertNotIn(call(("middle", 9000, 0)), self.cache.get_revision.call_args_list)
-        self.assertEqual(middle.current_revision, current)
+        self.assertEqual(middle.proposed_revision, current)
 
     def test_downgraded_contained_root_only_constrains_its_own_version(self):
         self.record("middle", 100, 0, (("a_source", 1),))
@@ -181,7 +185,7 @@ class ConsistentCutTests(unittest.TestCase):
         self.record("parent", 200, 0, (("middle", 100),))
         self.record("parent", 200, 1, (("middle", 9000),))
         middle = self.subscription(("middle", 9000, 3))
-        middle.current_revision = ("middle", 100, 0)
+        middle.proposed_revision = ("middle", 100, 0)
         parent = self.subscription(("parent", 200, 1))
         self.assertEqual(
             find_consistent_cut(middle, parent, self.cache),
@@ -191,8 +195,8 @@ class ConsistentCutTests(unittest.TestCase):
             find_consistent_cut(parent, middle, self.cache),
             (("parent", 200, 0), ("middle", 100, 0)),
         )
-        self.assertEqual(middle.current_revision, ("middle", 100, 0))
-        self.assertEqual(parent.current_revision, ("parent", 200, 1))
+        self.assertEqual(middle.proposed_revision, ("middle", 100, 0))
+        self.assertEqual(parent.proposed_revision, ("parent", 200, 1))
 
     def test_two_leaves_of_same_id_only_adjust_the_leading_version(self):
         self.record("x", 100, 7)
@@ -221,12 +225,12 @@ class ConsistentCutTests(unittest.TestCase):
     def test_missing_record_raises_without_changing_selections(self):
         a = self.subscription(self.record("a", 100, 4, (("x", 9),)))
         b = self.subscription(self.record("b", 200, dependencies=(("x", 7),)))
-        a.current_revision = a.latest_revision
-        b.current_revision = b.latest_revision
-        before = (a.current_revision, b.current_revision)
+        a.proposed_revision = a.latest_revision
+        b.proposed_revision = b.latest_revision
+        before = (a.proposed_revision, b.proposed_revision)
         with self.assertRaises(KeyError):
             find_consistent_cut(a, b, self.cache)
-        self.assertEqual((a.current_revision, b.current_revision), before)
+        self.assertEqual((a.proposed_revision, b.proposed_revision), before)
 
     def test_monotonic_revision_range_uses_binary_probes(self):
         for count in range(128):
@@ -243,22 +247,22 @@ class ConsistentCutTests(unittest.TestCase):
         b = self.subscription(self.record("b", 200))
         for missing in (a, b):
             with self.subTest(missing=missing.data_id):
-                missing.current_revision = None
+                missing.proposed_revision = None
                 with self.assertRaises(LookupError):
                     find_consistent_cut(a, b, self.cache)
-                missing.current_revision = missing.latest_revision
+                missing.proposed_revision = missing.latest_revision
         self.assertEqual(self.cache.mock_calls, [])
 
-    def test_current_selection_is_used_even_when_latest_is_a_newer_version(self):
+    def test_proposed_selection_is_used_even_when_latest_is_a_newer_version(self):
         a = self.subscription(self.record("a", 100, dependencies=(("x", 1),)))
         b = self.subscription(self.record("b", 200, dependencies=(("x", 1),)))
         a.latest_revision = ("a", 9000, 5)
         b.latest_revision = ("b", 8000, 7)
-        expected = (a.current_revision, b.current_revision)
+        expected = (a.proposed_revision, b.proposed_revision)
         # The newer records are deliberately unavailable. They are not inputs
         # to this comparison and must not be loaded or selected.
         self.assertEqual(find_consistent_cut(a, b, self.cache), expected)
-        self.assertEqual((a.current_revision, b.current_revision), expected)
+        self.assertEqual((a.proposed_revision, b.proposed_revision), expected)
         self.assertEqual(a.latest_revision, ("a", 9000, 5))
         self.assertEqual(b.latest_revision, ("b", 8000, 7))
 
@@ -269,7 +273,7 @@ class ConsistentCutTests(unittest.TestCase):
         b = self.subscription(self.record("b", 200, dependencies=(("x", 3),)))
         first = find_consistent_cut(a, b, self.cache)
         self.assertEqual(first, (("a", 100, 3), ("b", 200, 0)))
-        a.current_revision, b.current_revision = first
+        a.proposed_revision, b.proposed_revision = first
 
         c = self.subscription(self.record("c", 300, dependencies=(("x", 1),)))
         c.latest_revision = ("c", 9000, 0)
@@ -277,9 +281,9 @@ class ConsistentCutTests(unittest.TestCase):
         with patch.object(a, "revision", wraps=a.revision) as revisions:
             second = find_consistent_cut(a, c, self.cache)
         self.assertEqual(second, (("a", 100, 1), ("c", 300, 0)))
-        self.assertEqual(a.current_revision, first[0])
+        self.assertEqual(a.proposed_revision, first[0])
         self.assertEqual(a.latest_revision, ("a", 100, 5))
-        self.assertEqual(c.current_revision, ("c", 300, 0))
+        self.assertEqual(c.proposed_revision, ("c", 300, 0))
         # Even already cached newer graphs must not be considered again.
         self.assertTrue(all(
             args[0][2] <= 3 for args, _ in revisions.call_args_list

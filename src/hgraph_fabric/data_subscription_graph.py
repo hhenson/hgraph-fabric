@@ -10,12 +10,14 @@ class DataSubscriptionGraph:
 
     data_id: DataId
     latest_revision: DataRevisionId | None
+    proposed_revision: DataRevisionId | None
     _current_revision: DataRevisionId | None
     _revision_graphs: dict[DataRevisionId, DataEdgeGraph]
 
     def __init__(self, data_id: DataId) -> None:
         self.data_id = data_id
         self.latest_revision = None
+        self.proposed_revision = None
         self._current_revision = None
         self._revision_graphs = {}
 
@@ -43,6 +45,12 @@ class DataSubscriptionGraph:
         if self.current_revision is None:
             raise LookupError("No current revision is selected")
         return self.revision(self.current_revision, cache)
+
+    def proposed_graph(self, cache: DataCache) -> DataEdgeGraph:
+        """Load the proposed tree without selecting current or pruning history."""
+        if self.proposed_revision is None:
+            raise LookupError("No proposed revision is selected")
+        return self.revision(self.proposed_revision, cache)
 
     def revision(
         self, revision_id: DataRevisionId, cache: DataCache
