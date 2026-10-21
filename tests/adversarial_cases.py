@@ -4,10 +4,14 @@ The oracle expands raw records and scans candidate cuts; it never calls the
 production graph builder, pair resolver, or stabilization helpers. Root
 containment follows the agreed rule: only the contained root version matters.
 """
+from datetime import UTC, datetime
 from itertools import combinations, product
 
 from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_structures import DataUpdateDetails
+
+
+AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 class History:
@@ -20,7 +24,7 @@ class History:
         update = DataUpdateDetails(
             id=data_id, revision=(version, count), dependencies=tuple(dependencies) or None,
             weak_dependencies=tuple(weak) or None,
-            previous_revision=previous[1:] if previous and count == 0 else None,
+            previous_revision=previous[1:] if previous and count == 0 else None, as_of=AS_OF,
         )
         key = (data_id, version, count)
         self.records[key] = update
@@ -89,8 +93,17 @@ class HistoryCache(DataCache):
         self.loads.append(("revision", revision))
         return self.history.records[revision]
 
-    def load_data(self, version):
+    def load_version(self, version):
         raise AssertionError("Metadata search must not load dataframe payloads")
+
+    def write_version(self, version_id, data):
+        raise AssertionError("Metadata search must not write data")
+
+    def write_revision(self, revision_id, details):
+        raise AssertionError("Metadata search must not write revisions")
+
+    def write_latest(self, data_id, details):
+        raise AssertionError("Metadata search must not write latest")
 
 
 def current_cut(manager):

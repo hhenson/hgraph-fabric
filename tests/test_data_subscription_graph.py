@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import unittest
 from unittest.mock import Mock, call
 
@@ -5,6 +6,9 @@ from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_graph import DataEdgeGraph
 from hgraph_fabric.data_structures import DataRevisionDetails
 from hgraph_fabric.data_subscription_graph import DataSubscriptionGraph
+
+
+AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 class DataSubscriptionGraphTests(unittest.TestCase):
@@ -27,7 +31,7 @@ class DataSubscriptionGraphTests(unittest.TestCase):
     def test_setting_current_prunes_older_versions_and_revisions(self):
         subscription = DataSubscriptionGraph("prices")
         cache = Mock(spec=DataCache)
-        cache.get_revision.return_value = DataRevisionDetails(None, None, None)
+        cache.get_revision.return_value = DataRevisionDetails(None, None, None, as_of=AS_OF)
         revision_ids = [
             ("prices", 1, 99),
             ("prices", 2, 1),
@@ -54,7 +58,7 @@ class DataSubscriptionGraphTests(unittest.TestCase):
     def test_proposed_graph_keeps_current_and_history_until_committed(self):
         subscription = DataSubscriptionGraph("prices")
         cache = Mock(spec=DataCache)
-        cache.get_revision.return_value = DataRevisionDetails(None, None, None)
+        cache.get_revision.return_value = DataRevisionDetails(None, None, None, as_of=AS_OF)
         first, second = ("prices", 100, 0), ("prices", 200, 0)
         subscription.current_revision = first
         current_graph = subscription.current(cache)
@@ -106,8 +110,8 @@ class DataSubscriptionGraphTests(unittest.TestCase):
                 revision_id = ("prices", 1, 2)
                 setattr(subscription, f"{selection}_revision", revision_id)
                 revisions = {
-                    revision_id: DataRevisionDetails((("source", 1),), None, None),
-                    ("source", 1, 3): DataRevisionDetails(None, None, None),
+                    revision_id: DataRevisionDetails((("source", 1),), None, None, as_of=AS_OF),
+                    ("source", 1, 3): DataRevisionDetails(None, None, None, as_of=AS_OF),
                 }
                 cache = Mock(spec=DataCache)
                 cache.get_revision.side_effect = revisions.__getitem__
@@ -136,24 +140,24 @@ class DataSubscriptionGraphTests(unittest.TestCase):
     def test_leaf_builds_empty_graph_and_ignores_weak_dependencies(self):
         subscription = DataSubscriptionGraph("prices")
         cache = Mock(spec=DataCache)
-        cache.get_revision.return_value = DataRevisionDetails(None, (("weak", 1),), None)
+        cache.get_revision.return_value = DataRevisionDetails(None, (("weak", 1),), None, as_of=AS_OF)
         graph = subscription.revision(("prices", 1, 1), cache)
         self.assertEqual(set(graph), set())
         self.assertIs(subscription.revision(("prices", 1, 1), cache), graph)
         cache.get_revision.assert_called_once_with(("prices", 1, 1))
         cache.get_latest_revision.assert_not_called()
-        cache.get_data.assert_not_called()
+        cache.get_version.assert_not_called()
         self.assertIsNone(subscription.latest_revision)
         self.assertIsNone(subscription.current_revision)
 
     def test_expands_breadth_first_and_preserves_shared_dependency_edges(self):
         subscription = DataSubscriptionGraph("root")
         revisions = {
-            ("root", 1, 7): DataRevisionDetails((("a", 1), ("b", 2)), None, None),
-            ("a", 1, 3): DataRevisionDetails((("shared", 1),), (("weak", 1),), None),
-            ("b", 2, 4): DataRevisionDetails((("shared", 1),), None, None),
-            ("shared", 1, 9): DataRevisionDetails((("leaf", 3),), None, None),
-            ("leaf", 3, 8): DataRevisionDetails((), None, None),
+            ("root", 1, 7): DataRevisionDetails((("a", 1), ("b", 2)), None, None, as_of=AS_OF),
+            ("a", 1, 3): DataRevisionDetails((("shared", 1),), (("weak", 1),), None, as_of=AS_OF),
+            ("b", 2, 4): DataRevisionDetails((("shared", 1),), None, None, as_of=AS_OF),
+            ("shared", 1, 9): DataRevisionDetails((("leaf", 3),), None, None, as_of=AS_OF),
+            ("leaf", 3, 8): DataRevisionDetails((), None, None, as_of=AS_OF),
         }
         latest = {revision[:2]: revision for revision in revisions}
         cache = Mock(spec=DataCache)
@@ -174,7 +178,7 @@ class DataSubscriptionGraphTests(unittest.TestCase):
             call(("a", 1)), call(("b", 2)), call(("shared", 1)), call(("leaf", 3)),
         ])
         cache.latest.assert_not_called()
-        cache.get_data.assert_not_called()
+        cache.get_version.assert_not_called()
         cache.reset_mock()
         self.assertIs(subscription.revision(("root", 1, 7), cache), graph)
         cache.get_revision.assert_not_called()
@@ -183,8 +187,8 @@ class DataSubscriptionGraphTests(unittest.TestCase):
     def test_cycles_terminate_and_do_not_reselect_the_explicit_root_revision(self):
         subscription = DataSubscriptionGraph("root")
         revisions = {
-            ("root", 1, 2): DataRevisionDetails((("a", 1), ("root", 1)), None, None),
-            ("a", 1, 3): DataRevisionDetails((("root", 1),), None, None),
+            ("root", 1, 2): DataRevisionDetails((("a", 1), ("root", 1)), None, None, as_of=AS_OF),
+            ("a", 1, 3): DataRevisionDetails((("root", 1),), None, None, as_of=AS_OF),
         }
         cache = Mock(spec=DataCache)
         cache.get_revision.side_effect = revisions.__getitem__
@@ -201,7 +205,7 @@ class DataSubscriptionGraphTests(unittest.TestCase):
     def test_failed_expansion_is_not_retained_and_can_be_retried(self):
         subscription = DataSubscriptionGraph("root")
         revisions = {
-            ("root", 1, 1): DataRevisionDetails((("a", 1),), None, None),
+            ("root", 1, 1): DataRevisionDetails((("a", 1),), None, None, as_of=AS_OF),
         }
         cache = Mock(spec=DataCache)
         cache.get_revision.side_effect = revisions.__getitem__
@@ -209,16 +213,16 @@ class DataSubscriptionGraphTests(unittest.TestCase):
         with self.assertRaises(KeyError):
             subscription.revision(("root", 1, 1), cache)
         self.assertEqual(subscription._revision_graphs, {})
-        revisions[("a", 1, 3)] = DataRevisionDetails(None, None, None)
+        revisions[("a", 1, 3)] = DataRevisionDetails(None, None, None, as_of=AS_OF)
         graph = subscription.revision(("root", 1, 1), cache)
         self.assertEqual(set(graph), {(("root", 1), ("a", 1))})
 
     def test_conflicting_dependency_versions_do_not_retain_a_partial_graph(self):
         subscription = DataSubscriptionGraph("root")
         revisions = {
-            ("root", 1, 1): DataRevisionDetails((("a", 1), ("b", 1)), None, None),
-            ("a", 1, 1): DataRevisionDetails((("shared", 1),), None, None),
-            ("b", 1, 1): DataRevisionDetails((("shared", 2),), None, None),
+            ("root", 1, 1): DataRevisionDetails((("a", 1), ("b", 1)), None, None, as_of=AS_OF),
+            ("a", 1, 1): DataRevisionDetails((("shared", 1),), None, None, as_of=AS_OF),
+            ("b", 1, 1): DataRevisionDetails((("shared", 2),), None, None, as_of=AS_OF),
         }
         cache = Mock(spec=DataCache)
         cache.get_revision.side_effect = revisions.__getitem__

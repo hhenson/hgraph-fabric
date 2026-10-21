@@ -10,7 +10,7 @@ accepted, including when its output is unchanged.
 ## Status
 
 The package currently provides identity aliases, frozen revision metadata,
-a lazy data cache with abstract storage loaders, and a directed dependency
+a lazy data cache with abstract storage readers and writers, and a directed dependency
 edge graph with version checks and node queries. The subscription graph
 builds and retains full strong-dependency graphs breadth first, using the cache's
 latest-revision lookup for each specific dependency version. Each subscription
@@ -103,6 +103,39 @@ starts there and follows the `(version, revision_count)` pair in
 `previous_revision` from each version's revision-0 record, retaining the same
 data ID. That pair identifies the previous version and its maximum revision;
 `None` marks the end of the chain.
+
+`peek_latest(data_id)`, `peek_version(version_id)`, `peek_revision(revision_id)`,
+and `peek_latest_revision(version_id)` return the corresponding cached value or
+`None`. They do not load from storage or walk history; `peek_version` returns the
+cached Arrow table, including an empty table. The latest-revision peek reads only
+the version-specific lookup cache, even if other cached metadata could resolve it.
+
+`cached_ids()` returns a set of IDs represented in any cache, including entries
+cached through `get_version(version_id)` or `get_revision(revision_id)` without a
+latest record. It does not enumerate storage. `version_history(data_id)` lazily
+yields `(id, version, maximum_revision_count)` newest first, following revision-zero
+links and loading missing metadata. `peek_version_history(data_id)` yields only
+the prefix reachable from the cached latest and headers, stopping at the first
+missing link without loading. Missing storage records raise in the loading form;
+malformed history links raise in either form.
+
+`cache.write(data, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
+accepts an Arrow table and returns `(written_table, DataUpdateDetails)`. Explicit
+`id` and `as_of` override schema metadata. An ID must be supplied in one of those
+places; missing `as_of` defaults to UTC now. The schema stores UTF-8 `id`, decimal
+`version`, and ISO-format `as_of`. A metadata version is used if present;
+otherwise the version is derived from the resolved `as_of` in epoch milliseconds.
+Naive datetimes are interpreted as UTC for this calculation. Any version not
+greater than latest is advanced to `latest_version + 1`, without changing `as_of`.
+Other metadata and the input table are preserved.
+
+Writes create revision zero, linking to the previous latest version and count.
+Storage subclasses implement `write_version(DataVersionId, Table)`,
+`write_revision(DataRevisionId, DataRevisionDetails)`, and
+`write_latest(DataId, LatestDataDetails)`, called in that order. `load_latest`
+raises `KeyError` for a new ID. After successful persistence, the cache retains
+the table and metadata; deliver the returned update to every associated manager
+as part of the coordinated write/notification operation. Storage errors propagate.
 
 We will build the components incrementally in Python to establish the structure
 and semantics. A later port to Rust or C++ remains an open decision. Integration

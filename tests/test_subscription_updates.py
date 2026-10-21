@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import unittest
 from unittest.mock import patch
 
@@ -5,6 +6,9 @@ from hgraph_fabric.consistent_cut import find_consistent_cut
 from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_structures import DataUpdateDetails
 from hgraph_fabric.data_subscription_manager import DataSubscriptionManager
+
+
+AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 class UpdateOnlyCache(DataCache):
@@ -16,8 +20,17 @@ class UpdateOnlyCache(DataCache):
     def load_revision(self, revision_id):
         raise KeyError(revision_id)
 
-    def load_data(self, version_id):
+    def load_version(self, version_id):
         raise KeyError(version_id)
+
+    def write_version(self, version_id, data):
+        raise AssertionError("Update notifications must not write data")
+
+    def write_revision(self, revision_id, details):
+        raise AssertionError("Update notifications must not write revisions")
+
+    def write_latest(self, data_id, details):
+        raise AssertionError("Update notifications must not write latest")
 
 
 class SubscriptionUpdateTests(unittest.TestCase):
@@ -28,7 +41,7 @@ class SubscriptionUpdateTests(unittest.TestCase):
     def update(self, data_id, version, count=0, dependencies=None, previous=None):
         return DataUpdateDetails(
             id=data_id, revision=(version, count),
-            dependencies=dependencies, weak_dependencies=None, previous_revision=previous,
+            dependencies=dependencies, weak_dependencies=None, previous_revision=previous, as_of=AS_OF,
         )
 
     def seed_pair(self):
