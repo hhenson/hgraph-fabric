@@ -54,7 +54,7 @@ class DataCacheTests(unittest.TestCase):
     def test_repeated_reads_load_each_resource_once(self):
         for getter, key, expected in (
             (self.cache.latest, "prices", self.cache.latest_values["prices"]),
-            (self.cache.get_data, ("prices", 1), self.cache.data_values[("prices", 1)]),
+            (self.cache.get_version, ("prices", 1), self.cache.data_values[("prices", 1)]),
             (
                 self.cache.get_revision,
                 ("prices", 1, 1),
@@ -73,7 +73,7 @@ class DataCacheTests(unittest.TestCase):
         # ordinary read must still load them and make them visible to peeks.
         resources = (
             (self.cache.peek_latest, self.cache.latest, "prices"),
-            (self.cache.peek_version, self.cache.get_data, ("prices", 1)),
+            (self.cache.peek_version, self.cache.get_version, ("prices", 1)),
             (self.cache.peek_revision, self.cache.get_revision, ("prices", 1, 1)),
             (self.cache.peek_latest_revision, self.cache.get_latest_revision, ("prices", 1)),
         )
@@ -116,7 +116,7 @@ class DataCacheTests(unittest.TestCase):
 
     def test_update_replaces_latest_and_retains_old_resources(self):
         old_latest = self.cache.latest("prices")
-        old_data = self.cache.get_data(("prices", 1))
+        old_data = self.cache.get_version(("prices", 1))
         old_revision = self.cache.get_revision(("prices", 1, 1))
         self.cache.loads.clear()
         update = DataUpdateDetails(
@@ -135,13 +135,13 @@ class DataCacheTests(unittest.TestCase):
             self.cache.get_revision(("prices", 2, 2)),
             DataRevisionDetails((("source", 3),), None, (1, 1)),
         )
-        self.assertIs(self.cache.get_data(("prices", 1)), old_data)
+        self.assertIs(self.cache.get_version(("prices", 1)), old_data)
         self.assertIs(self.cache.get_revision(("prices", 1, 1)), old_revision)
         self.assertEqual(self.cache.loads, [])
         new_data = table({"price": [20]})
         self.cache.data_values[("prices", 2)] = new_data
-        self.assertIs(self.cache.get_data(("prices", 2)), new_data)
-        self.assertIs(self.cache.get_data(("prices", 2)), new_data)
+        self.assertIs(self.cache.get_version(("prices", 2)), new_data)
+        self.assertIs(self.cache.get_version(("prices", 2)), new_data)
         self.assertEqual(self.cache.loads, [("data", ("prices", 2))])
 
     def test_update_seeds_empty_cache_and_same_version_revision(self):
@@ -188,7 +188,7 @@ class DataCacheTests(unittest.TestCase):
         for getter, backing, key, value, kind in (
             (self.cache.latest, self.cache.latest_values, "other",
              ("other", 1, 1), "latest"),
-            (self.cache.get_data, self.cache.data_values, ("other", 1),
+            (self.cache.get_version, self.cache.data_values, ("other", 1),
              table({"price": [30]}), "data"),
             (self.cache.get_revision, self.cache.revision_values, ("other", 1, 1),
              DataRevisionDetails(None, None, None), "revision"),

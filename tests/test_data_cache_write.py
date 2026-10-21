@@ -45,7 +45,7 @@ class DataCacheWriteTests(unittest.TestCase):
         self.assertEqual(cache.writes[1][2], DataRevisionDetails((), (), None))
         self.assertEqual(cache.writes[2][2], LatestDataDetails((1234, 0)))
         cache.loads.clear()
-        self.assertIs(cache.get_data(("prices", 1234)), written)
+        self.assertIs(cache.get_version(("prices", 1234)), written)
         self.assertEqual(cache.latest("prices"), ("prices", 1234, 0))
         self.assertEqual(cache.get_latest_revision(("prices", 1234)), ("prices", 1234, 0))
         self.assertEqual(cache.get_revision(("prices", 1234, 0)), DataRevisionDetails((), (), None))
@@ -120,7 +120,7 @@ class DataCacheWriteTests(unittest.TestCase):
                 cache.data_values[("prices", 1000)] = old_data
                 if warm:
                     cache.latest("prices")
-                    cache.get_data(("prices", 1000))
+                    cache.get_version(("prices", 1000))
                 as_of = datetime(1970, 1, 1, tzinfo=UTC) + timedelta(milliseconds=candidate)
                 metadata = {b"version": str(candidate).encode()} if supplied_version else None
                 written, update = cache.write(table({"price": [20]}, metadata=metadata), id="prices", as_of=as_of)
@@ -129,7 +129,7 @@ class DataCacheWriteTests(unittest.TestCase):
                 self.assertEqual(update.previous_revision, (1000, 17))
                 self.assertEqual(written.schema.metadata[b"version"], str(expected).encode())
                 self.assertEqual(written.schema.metadata[b"as_of"], as_of.isoformat().encode())
-                self.assertIs(cache.get_data(("prices", 1000)), old_data)
+                self.assertIs(cache.get_version(("prices", 1000)), old_data)
 
     def test_repeated_timestamp_writes_form_a_readable_persisted_history(self):
         cache = MemoryDataCache()
@@ -145,7 +145,7 @@ class DataCacheWriteTests(unittest.TestCase):
         reader.revision_values = cache.revision_values.copy()
         for value in range(3):
             self.assertEqual(reader.get_latest_revision(("prices", 1000 + value)), ("prices", 1000 + value, 0))
-            self.assertEqual(reader.get_data(("prices", 1000 + value)).to_pydict(), {"price": [value]})
+            self.assertEqual(reader.get_version(("prices", 1000 + value)).to_pydict(), {"price": [value]})
 
     def test_missing_id_or_invalid_metadata_fails_before_persistence(self):
         for metadata in (None, {b"id": b"prices", b"version": b"not-an-int"},
@@ -188,4 +188,4 @@ class DataCacheWriteTests(unittest.TestCase):
         self.assertEqual(sub.current_revision, ("prices", 0, 0))
         self.assertEqual(manager.apply_update(update), {("prices", 1)})
         self.assertEqual(sub.current_revision, ("prices", 1, 0))
-        self.assertIs(cache.get_data(("prices", 1)), written)
+        self.assertIs(cache.get_version(("prices", 1)), written)

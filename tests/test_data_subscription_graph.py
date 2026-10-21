@@ -142,7 +142,7 @@ class DataSubscriptionGraphTests(unittest.TestCase):
         self.assertIs(subscription.revision(("prices", 1, 1), cache), graph)
         cache.get_revision.assert_called_once_with(("prices", 1, 1))
         cache.get_latest_revision.assert_not_called()
-        cache.get_data.assert_not_called()
+        cache.get_version.assert_not_called()
         self.assertIsNone(subscription.latest_revision)
         self.assertIsNone(subscription.current_revision)
 
@@ -174,7 +174,7 @@ class DataSubscriptionGraphTests(unittest.TestCase):
             call(("a", 1)), call(("b", 2)), call(("shared", 1)), call(("leaf", 3)),
         ])
         cache.latest.assert_not_called()
-        cache.get_data.assert_not_called()
+        cache.get_version.assert_not_called()
         cache.reset_mock()
         self.assertIs(subscription.revision(("root", 1, 7), cache), graph)
         cache.get_revision.assert_not_called()

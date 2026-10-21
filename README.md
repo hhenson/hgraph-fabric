@@ -110,6 +110,15 @@ and `peek_latest_revision(version_id)` return the corresponding cached value or
 cached Arrow table, including an empty table. The latest-revision peek reads only
 the version-specific lookup cache, even if other cached metadata could resolve it.
 
+`cached_ids()` returns a set of IDs represented in any cache, including entries
+cached through `get_version(version_id)` or `get_revision(revision_id)` without a
+latest record. It does not enumerate storage. `version_history(data_id)` lazily
+yields `(id, version, maximum_revision_count)` newest first, following revision-zero
+links and loading missing metadata. `peek_version_history(data_id)` yields only
+the prefix reachable from the cached latest and headers, stopping at the first
+missing link without loading. Missing storage records raise in the loading form;
+malformed history links raise in either form.
+
 `cache.write(data, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
 accepts an Arrow table and returns `(written_table, DataUpdateDetails)`. Explicit
 `id` and `as_of` override schema metadata. An ID must be supplied in one of those

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 
 from pyarrow import Table
@@ -22,6 +23,13 @@ class DataCache(ABC):
         self._revisions: dict[DataRevisionId, DataRevisionDetails] = {}
         self._latest_revisions: dict[DataVersionId, DataRevisionId] = {}
 
+    def cached_ids(self) -> set[DataId]:
+        """Return IDs with any cached data or metadata, without loading."""
+        return set(self._latest) | {
+            key[0] for cache in (self._data, self._revisions, self._latest_revisions)
+            for key in cache
+        }
+
     def peek_latest(self, data_id: DataId) -> DataRevisionId | None:
         """Return cached latest for an ID, or None, without loading."""
         return self._latest.get(data_id)
@@ -43,7 +51,7 @@ class DataCache(ABC):
             self._latest[data_id] = self.load_latest(data_id)
         return self._latest[data_id]
 
-    def get_data(self, version_id: DataVersionId) -> Table:
+    def get_version(self, version_id: DataVersionId) -> Table:
         if version_id not in self._data:
             self._data[version_id] = self.load_version(version_id)
         return self._data[version_id]
@@ -117,27 +125,40 @@ class DataCache(ABC):
     def get_latest_revision(self, version_id: DataVersionId) -> DataRevisionId:
         """Walk revision-0 previous-version links from the latest revision."""
         if version_id not in self._latest_revisions:
-            data_id, _ = version_id
-            revision_id = self.latest(data_id)
-            visited = set()
-            while revision_id is not None:
-                if revision_id[0] != data_id:
-                    raise ValueError("Version history points to a different data ID")
+            for revision_id in self.version_history(version_id[0]):
                 if revision_id[:2] == version_id:
                     self._latest_revisions[version_id] = revision_id
                     break
-                if revision_id[:2] in visited:
-                    raise ValueError("Cyclic version history")
-                visited.add(revision_id[:2])
-                header = self.get_revision((data_id, revision_id[1], 0))
-                revision_id = (
-                    (data_id, *header.previous_revision)
-                    if header.previous_revision is not None
-                    else None
-                )
             else:
                 raise KeyError(version_id)
         return self._latest_revisions[version_id]
+
+    def version_history(self, data_id: DataId) -> Iterator[DataRevisionId]:
+        """Yield each version's maximum revision newest first, loading as needed."""
+        return self._version_history(data_id, peek=False)
+
+    def peek_version_history(self, data_id: DataId) -> Iterator[DataRevisionId]:
+        """Yield the cached history prefix; stop at an uncached head or header."""
+        return self._version_history(data_id, peek=True)
+
+    def _version_history(self, data_id: DataId, *, peek: bool) -> Iterator[DataRevisionId]:
+        revision_id = self.peek_latest(data_id) if peek else self.latest(data_id)
+        while revision_id is not None:
+            if revision_id[0] != data_id:
+                raise ValueError("Version history points to a different data ID")
+            yield revision_id
+            # Only revision zero carries the link to the previous sparse
+            # version and its maximum count. Never subtract from a version ID.
+            header_id = (data_id, revision_id[1], 0)
+            header = self.peek_revision(header_id) if peek else self.get_revision(header_id)
+            if header is None:
+                return
+            previous = header.previous_revision
+            # Strictly decreasing versions also rule out cycles without keeping
+            # a set of every visited version for a long history.
+            if previous is not None and previous[0] >= revision_id[1]:
+                raise ValueError("Revision-zero history must point to an older version")
+            revision_id = (data_id, *previous) if previous is not None else None
 
     def apply_update(self, update: DataUpdateDetails) -> None:
         """Accept the supplied update as latest and cache its revision metadata."""
