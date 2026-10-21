@@ -19,7 +19,13 @@ The original four review reproductions are ordinary passing regressions. The
 [second conflict-tracker review](CONFLICT_TRACKER_REVIEW.md) now covers conflict-path
 wakeups and cleanup with passing regressions. Retry-after-error findings were
 withdrawn: unexpected failures are fatal. Shared-cache delivery follows the
-coordinated contract. Neither suite retains expected failures.
+coordinated contract. Those original findings have no remaining expected failures.
+
+The [deep transition review](DEEP_TRANSITION_REVIEW.md) adds 13,032 publication
+steps and 1,296 bounded pair searches. It identifies one new ordering gap with
+two expected-failure reproductions: refreshing historical descendants can break
+the expanded monotonicity assumed by binary search. The strict runner exposes
+both failures; the full suite currently has 147 passes and two expected failures.
 
 ## Passing scenario matrix
 
