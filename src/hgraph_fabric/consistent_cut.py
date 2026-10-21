@@ -26,7 +26,9 @@ def find_consistent_cut(
     subscription, and the other stays fixed. Prefer matching all original
     common nodes to omitting any; also check newly shared nodes. While a node
     remains a dependency, both subscriptions record its changes and its
-    versions advance monotonically. Raise LookupError if no alignment exists.
+    versions advance monotonically. If holding one side fixed cannot find an
+    alignment, search both bounded histories as an exceptional fallback. Raise
+    LookupError if neither search finds a compatible pair.
 
     Trees loaded during the search are cached normally. No latest, proposed or
     current selection is changed; the caller can apply the
@@ -164,7 +166,64 @@ def find_consistent_cut(
             if _first_mismatch(nodes, fixed_nodes) is None:
                 revision = (leading.data_id, version, count)
                 return result(revision)
-    raise LookupError("No revision aligns with the fixed subscription")
+    # Independent inputs may have been consumed in different orders, leaving no
+    # revision that matches the other side's complete fixed dependency vector.
+    # Only after the normal search fails do we allow both sides to move. Retain
+    # argument order and the original proposed upper bounds throughout.
+    fixed = right if leading_is_left else left
+    fixed_revision = right_revision if leading_is_left else left_revision
+    joint = _search_both_histories(leading, fixed, start, fixed_revision, common, cache)
+    return joint if leading_is_left else joint[::-1]
+
+
+def _search_both_histories(
+    leading: DataSubscriptionGraph,
+    fixed: DataSubscriptionGraph,
+    leading_start: DataRevisionId,
+    fixed_start: DataRevisionId,
+    common: set[DataId],
+    cache: DataCache,
+) -> tuple[DataRevisionId, DataRevisionId]:
+    """Rare exhaustive fallback; prefer retaining the formerly fixed side.
+
+    Visit its history newest first, searching the leading history newest first
+    at each step. Prefer preserving the original common dependencies to omitting
+    them. This costs O(L * R) tree comparisons in the worst case, but does not
+    affect the normal bounded/binary search. Metadata failures propagate.
+    """
+    absent = None
+    for fixed_revision in _revisions_backwards(fixed_start, cache):
+        fixed_nodes = _nodes(fixed.revision(fixed_revision, cache), fixed_revision)
+        for leading_revision in _revisions_backwards(leading_start, cache):
+            leading_nodes = _nodes(leading.revision(leading_revision, cache), leading_revision)
+            # Historical membership can differ from the initial pair. Apply
+            # the same root-containment rule to each candidate pair afresh.
+            if leading.data_id in fixed_nodes:
+                matches = leading_revision[1] == fixed_nodes[leading.data_id]
+            elif fixed.data_id in leading_nodes:
+                matches = fixed_revision[1] == leading_nodes[fixed.data_id]
+            else:
+                matches = _first_mismatch(leading_nodes, fixed_nodes) is None
+            if not matches:
+                continue
+            pair = leading_revision, fixed_revision
+            if common <= leading_nodes.keys() and common <= fixed_nodes.keys():
+                return pair
+            if absent is None:
+                absent = pair
+    if absent is not None:
+        return absent
+    raise LookupError("No compatible pair exists within the proposed histories")
+
+
+def _revisions_backwards(
+    revision: DataRevisionId, cache: DataCache
+) -> Iterator[DataRevisionId]:
+    # Counts are consecutive within a version. Version IDs are sparse and must
+    # be reached through revision-zero links, including the prior maximum count.
+    for version, maximum_count in _version_bounds(revision, cache):
+        for count in range(maximum_count, -1, -1):
+            yield revision[0], version, count
 
 
 def _nodes(graph: DataEdgeGraph, revision: DataRevisionId) -> dict[DataId, DataVersion]:

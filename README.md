@@ -51,7 +51,11 @@ links across sparse versions, and binary-searches counts within one version.
 If one subscription's root occurs in the other tree, only that root version
 needs to match; otherwise all common nodes are checked. Subscriptions record
 dependency changes while those dependencies remain present. Exact matches
-take priority over missing-dependency candidates.
+take priority over missing-dependency candidates. If the normal search cannot
+align either history with the fixed side, an exceptional fallback searches both
+histories within their proposed bounds. It preserves those matching preferences
+and does not change selections. This fallback can require a quadratic number of
+tree comparisons; successful normal comparisons do not enter it.
 Concrete storage backends and end-to-end fabric execution are not implemented.
 
 The cache's `latest(data_id)` returns a revision ID. Historical version lookup

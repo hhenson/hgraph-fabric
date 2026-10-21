@@ -1,7 +1,9 @@
 # Adversarial stabilisation review
 
-Reviewed implementation: `b50c01d` (the proposed-cut and affected-item update algorithm).
-This change adds tests and review evidence only; it does not alter the algorithm.
+Original reviewed implementation: `b50c01d` (the proposed-cut and affected-item
+update algorithm). Finding 1 is now addressed by an exceptional joint-history
+fallback. The remaining three cases are preserved, with their assumptions made
+explicit below.
 
 ## Run
 
@@ -13,7 +15,7 @@ python -I tests/run_adversarial.py
 python -I tests/run_adversarial.py --strict
 ```
 
-The first two commands include four explicitly labelled `expectedFailure` tests.
+The first two commands include three explicitly labelled `expectedFailure` tests.
 They do **not** mean the implementation has no defects. The strict command removes
 that designation and exits unsuccessfully, exposing each original failure.
 An unexpected success in the normal suite fails the run so a repaired finding
@@ -29,7 +31,8 @@ must have its expected-failure designation removed.
 | Dependency appearance/disappearance histories | 3,072 | 512 reproducible seeds × six registration orders, three roots and three sources, sparse versions and within-version counts |
 | Larger graph shapes | 15 | Chain, star, diamond, disconnected and cyclic graphs at sizes 2, 8 and 32 |
 | Metadata-only update streams | 12 | Six root delivery orders with and without a subscription to the shared source |
-| **Total** | **37,520** | Scenarios, not 37,520 distinct topology shapes |
+| Monotonic crossed-history paths | 3,600 | Six two-input paths per side, all intermediate proposed ceilings, both argument orders, sparse versions and revision counts |
+| **Total** | **41,120** | Scenarios, not 37,520 distinct topology shapes |
 
 The live-stream cases check every update and its duplicate, not just the final
 cut. An additional fault-injection test fails each metadata-read position of a
@@ -54,9 +57,9 @@ present and record every step of a continuous dependency. Sparse root versions
 are 100 and 9000, with revision counts 0 and 1 in each. Weak references deliberately
 point at unavailable records to confirm that strong-only expansion is used.
 
-## Confirmed review findings
+## Review cases and their assumptions
 
-### 1. Crossed input frontiers can reject an existing cut (high priority)
+### 1. Crossed input frontiers can reject an existing cut (addressed)
 
 Both roots have an older revision consuming `(x=1, y=1)`. Their latest revisions
 consume `a: (x=2, y=1)` and `b: (x=1, y=2)` respectively. A valid cut exists by
@@ -65,25 +68,33 @@ the first conflicting ID and holds the other root fixed; neither one-sided
 history search can reach that fixed vector, so initialization raises
 `LookupError: No revision aligns with the fixed subscription`.
 
-These are monotonic histories with complete consumed-input changes. Independent
-inputs are simply observed in different orders. This challenges the earlier
-assumption that one side can always be held fixed.
+These are monotonic histories with complete consumed-input changes, but the
+application may exclude crossed observations. The fix is defensive: only when
+the existing fixed-side search fails, enumerate both actual revision histories
+within the proposals, visiting the formerly fixed side newest first. Preserve
+original common dependencies before considering omissions. Do not swallow
+missing metadata or malformed-history errors. Worst-case work is O(L * R);
+normal successful comparisons retain the existing search and cost.
 
 Location: [`consistent_cut.py`](../src/hgraph_fabric/consistent_cut.py#L89).
 Reproduction: `test_crossed_input_frontiers_find_the_existing_older_cut`.
 
-### 2. A single-subscription update commits an unloadable tree (high priority)
+### 2. A single-subscription update commits an unloadable tree (contract-dependent)
 
 Start with a valid leaf subscription `a@100`, then update `a@200` to depend on an
 unavailable version. With no other subscriptions there are no pair comparisons,
 and nothing builds the proposed tree before commit. `apply_update` reports
 `a@200` as available; loading its current graph afterwards raises `KeyError`.
 The existing multi-subscription failure-isolation behaviour is bypassed.
+This test assumes tree loadability must be checked before committing a cut.
+If publication guarantees that all dependency metadata is available, the
+missing-metadata example is outside that contract; a single valid tree has no
+inter-subscription consistency constraint to check.
 
 Location: [`data_subscription_manager.py`](../src/hgraph_fabric/data_subscription_manager.py#L71).
 Reproduction: `test_single_subscription_does_not_commit_unloadable_tree`.
 
-### 3. Retained trees make cut results depend on cache history (high priority)
+### 3. Retained trees make cut results depend on cache history (snapshot semantics)
 
 A retained root revision references `middle@100`; the middle's revision count
 then advances from dependencies `x@1` to `x@2` without changing its data version.
@@ -91,6 +102,11 @@ A newly expanded copy of that exact root revision follows the middle's latest
 count, while the retained tree still contains `x@1`. Adding a peer consuming
 `x@2` succeeds with a fresh manager but raises `LookupError` with the warmed one,
 despite identical final metadata and identical root revision IDs.
+
+This case intentionally leaves the root's own revision unchanged after the
+middle revision advances. It demonstrates different expansion results, not
+corrupt dataframe contents. A rule requiring a corresponding root revision
+before further resolution would need to be explicit in the test contract.
 
 The tree key includes only the root revision, but expansion depends on mutable
 latest-count lookups for descendants. The design needs explicit snapshot or

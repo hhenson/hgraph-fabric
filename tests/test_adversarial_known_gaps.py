@@ -1,9 +1,8 @@
-"""Executable review findings, deliberately expected failures until resolved.
+"""Review reproductions: resolved cases pass; open cases are expected failures.
 
-These assert the desired behavior rather than codifying a bug as success.
-Run strictly (without expectedFailure wrappers) using the command documented
-in ADVERSARIAL.md to see the original exceptions/assertions. Production logic
-is intentionally unchanged by this review/test-pack change.
+The open cases assert the stated behavior under the assumptions in ADVERSARIAL.md.
+Run strictly (without expectedFailure wrappers) to expose their exceptions and
+assertions. The crossed-history case now exercises the defensive fallback.
 """
 import unittest
 
@@ -12,7 +11,6 @@ from adversarial_cases import History, HistoryCache, current_cut
 
 
 class AdversarialKnownGaps(unittest.TestCase):
-    @unittest.expectedFailure
     def test_crossed_input_frontiers_find_the_existing_older_cut(self):
         # Both consumers record every consumed input change. They are merely
         # behind on different inputs, which can happen with independent feeds.
