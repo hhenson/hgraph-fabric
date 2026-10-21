@@ -154,7 +154,7 @@ class PollingDataFabricSession(DataFabricSession):
 def run_data_fabric_session(
     cache: DataCache,
     transport: DataFabricTransport,
-    callback: Callable[[dict[DataId, Table]], None],
+    callback: Callable[[dict[DataId, Table], Callable[..., tuple[Table, DataUpdateDetails]]], None],
     *,
     subscriptions: Iterable[DataId] = (),
     poll_interval: float = 0.05,
@@ -162,8 +162,9 @@ def run_data_fabric_session(
     """Run a session on one thread and yield its synchronous publish callable.
 
     The worker owns the cache, transport, and callbacks for this context. External
-    publishers queue work and wait for its result; callback publications execute
-    on the worker directly. Do not access the cache or transport concurrently.
+    publishers queue work and wait for their result. Callbacks receive both the
+    change set and publish callable, including on initialization; their publishes
+    execute directly on the worker. Do not access cache or transport concurrently.
 
     Polling is bounded by poll_interval (seconds) to service queued publications
     and shutdown. The transport must honor that timeout and callbacks must return
@@ -231,7 +232,7 @@ def run_data_fabric_session(
                     # publishers cannot starve subscription callbacks.
                     changed = session.poll(poll_interval)
                     if changed:
-                        callback(changed)
+                        callback(changed, publish)
         except BaseException as exc:
             error = exc
         finally:

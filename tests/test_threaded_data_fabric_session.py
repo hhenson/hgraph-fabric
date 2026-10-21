@@ -1,4 +1,4 @@
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import UTC, datetime
 from queue import Empty, Queue
 from threading import Event, current_thread
@@ -50,7 +50,7 @@ class ThreadedSessionTests(unittest.TestCase):
     def test_initial_data_and_updates_callback_on_owner_thread(self):
         initial, _ = self.seed()
         changes = Queue()
-        def callback(delta):
+        def callback(delta, publish):
             changes.put((delta, current_thread()))
         writes = []
         original = self.cache.write
@@ -80,16 +80,14 @@ class ThreadedSessionTests(unittest.TestCase):
     def test_callback_can_publish_without_deadlock(self):
         self.seed()
         changes = Queue()
-        publisher = None
-        def callback(delta):
+        def callback(delta, publish):
             value = delta["a"]["value"][0].as_py()
             if value == 1:
-                publisher(table({"value": [2]}), id="a", as_of=AS_OF)
+                publish(table({"value": [2]}), id="a", as_of=AS_OF)
             changes.put(value)
         with run_data_fabric_session(
             self.cache, self.transport, callback, subscriptions=["a"], poll_interval=0.01,
         ) as publish:
-            publisher = publish
             self.assertEqual(changes.get(timeout=2), 0)
             publish(table({"value": [1]}), id="a", as_of=AS_OF)
             self.assertEqual(changes.get(timeout=2), 1)
@@ -98,7 +96,7 @@ class ThreadedSessionTests(unittest.TestCase):
     def test_concurrent_publishers_are_serialized_and_keep_write_arguments(self):
         callback = Queue()
         with run_data_fabric_session(
-            self.cache, self.transport, callback.put, poll_interval=0.001,
+            self.cache, self.transport, lambda delta, publish: callback.put(delta), poll_interval=0.001,
         ) as publish:
             def send(value):
                 return publish(
@@ -119,12 +117,39 @@ class ThreadedSessionTests(unittest.TestCase):
         self.assertTrue(all(thread is owner for _, thread in self.transport.calls))
         self.assertTrue(callback.empty())
 
+    def test_initial_callback_can_publish_before_context_entry_returns(self):
+        self.seed()
+        completed = Event()
+        results = Queue()
+        original_result = Future.result
+        caller = current_thread()
+        def delayed_result(future, timeout=None):
+            if current_thread() is caller:
+                self.assertTrue(completed.wait(2))
+            return original_result(future, timeout)
+        def callback(delta, publish):
+            try:
+                written, update = publish(table({"value": [42]}), id="output", as_of=AS_OF)
+                results.put((publish, written, update))
+            finally:
+                completed.set()
+        # Force the worker's first callback to precede the caller receiving the
+        # publish callable. This is a valid scheduling order, not a timed race.
+        with patch.object(Future, "result", delayed_result):
+            with run_data_fabric_session(
+                self.cache, self.transport, callback, subscriptions=["a"], poll_interval=0.01,
+            ) as publish:
+                callback_publish, written, update = results.get(timeout=2)
+                self.assertIs(callback_publish, publish)
+                self.assertEqual(update.id, "output")
+                self.assertEqual(written["value"][0].as_py(), 42)
+
     def test_shutdown_allows_in_flight_callback_to_finish_publishing(self):
         self.seed()
         initial = Event()
         entered = Event()
         release = Event()
-        def callback(delta):
+        def callback(delta, publish):
             value = delta["a"]["value"][0].as_py()
             if value == 0:
                 initial.set()
@@ -157,7 +182,7 @@ class ThreadedSessionTests(unittest.TestCase):
     def test_context_body_exception_stops_and_joins_worker(self):
         error = ValueError("Caller failed")
         with self.assertRaises(ValueError) as raised:
-            with run_data_fabric_session(self.cache, self.transport, lambda _: None, poll_interval=0.01):
+            with run_data_fabric_session(self.cache, self.transport, lambda _, publish: None, poll_interval=0.01):
                 raise error
         self.assertIs(raised.exception, error)
         self.assertTrue(self.transport.stopped.is_set())
@@ -167,13 +192,13 @@ class ThreadedSessionTests(unittest.TestCase):
         error = OSError("Start failed")
         with patch.object(self.transport, "start", side_effect=error):
             with self.assertRaises(OSError) as raised:
-                with run_data_fabric_session(self.cache, self.transport, lambda _: None):
+                with run_data_fabric_session(self.cache, self.transport, lambda _, publish: None):
                     self.fail("A failed session must not be yielded")
         self.assertIs(raised.exception, error)
 
     def test_subscription_initialization_failure_stops_worker(self):
         with self.assertRaises(KeyError):
-            with run_data_fabric_session(self.cache, self.transport, lambda _: None, subscriptions=["missing"]):
+            with run_data_fabric_session(self.cache, self.transport, lambda _, publish: None, subscriptions=["missing"]):
                 self.fail("Missing subscription must fail initialization")
         self.assertTrue(self.transport.stopped.is_set())
         self.assertFalse(self.transport.calls[0][1].is_alive())
@@ -181,7 +206,7 @@ class ThreadedSessionTests(unittest.TestCase):
     def test_callback_failure_propagates_on_publish_and_exit(self):
         self.seed()
         error = ValueError("Callback failed")
-        def callback(_):
+        def callback(_, publish):
             raise error
         with self.assertRaises(ValueError) as raised:
             with run_data_fabric_session(
@@ -205,7 +230,7 @@ class ThreadedSessionTests(unittest.TestCase):
         with self.assertRaises(OSError) as raised:
             with patch.object(self.cache, "write", side_effect=fail_write):
                 with run_data_fabric_session(
-                    self.cache, self.transport, lambda _: None, poll_interval=0.01,
+                    self.cache, self.transport, lambda _, publish: None, poll_interval=0.01,
                 ) as publish:
                     with ThreadPoolExecutor(max_workers=2) as pool:
                         first = pool.submit(publish, table({"value": [1]}), "a")
@@ -224,7 +249,7 @@ class ThreadedSessionTests(unittest.TestCase):
         error = OSError("Receive failed")
         with patch.object(self.transport, "poll", side_effect=error):
             with self.assertRaises(OSError) as raised:
-                with run_data_fabric_session(self.cache, self.transport, lambda _: None):
+                with run_data_fabric_session(self.cache, self.transport, lambda _, publish: None):
                     self.assertTrue(self.transport.stopped.wait(2))
         self.assertIs(raised.exception, error)
 
@@ -233,7 +258,7 @@ class ThreadedSessionTests(unittest.TestCase):
             with self.subTest(interval=interval):
                 with self.assertRaises(ValueError):
                     with run_data_fabric_session(
-                        self.cache, self.transport, lambda _: None, poll_interval=interval,
+                        self.cache, self.transport, lambda _, publish: None, poll_interval=interval,
                     ):
                         self.fail("Invalid interval must not start a worker")
         self.assertEqual(self.transport.calls, [])

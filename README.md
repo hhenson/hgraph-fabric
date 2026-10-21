@@ -193,8 +193,10 @@ with run_data_fabric_session(cache, transport, on_update, subscriptions=["prices
 ```
 
 The worker starts the session, registers subscriptions, and calls
-`on_update(dict[DataId, Table])` for the initial cut and later nonempty changes.
-Callbacks run on the worker and may begin before the context body. Publications
+`on_update(changes, publish)` for the initial cut and later nonempty changes,
+where `changes` is a `dict[DataId, Table]`. The callback receives the publish
+callable directly, so even the initial callback can publish before the context
+body has bound its own callable. Callbacks run on the worker. Publications
 from other threads are queued and wait for their result; a callback can use the
 publish callable directly without deadlocking. Cache and transport operations
 all run on the worker; callers must not access those objects concurrently.
