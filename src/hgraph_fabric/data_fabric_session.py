@@ -1,5 +1,11 @@
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import Future
+from contextlib import contextmanager
 from datetime import datetime
+from functools import partial
+from math import isfinite
+from queue import Empty, Queue
+from threading import Lock, Thread, current_thread
 from time import monotonic
 from types import TracebackType
 from typing import Protocol, Self
@@ -142,3 +148,115 @@ class PollingDataFabricSession(DataFabricSession):
         data, update = super().publish(data, id, dependencies, weak_dependencies, as_of)
         self._transport.send(update)
         return data, update
+
+
+@contextmanager
+def run_data_fabric_session(
+    cache: DataCache,
+    transport: DataFabricTransport,
+    callback: Callable[[dict[DataId, Table], Callable[..., tuple[Table, DataUpdateDetails]]], None],
+    *,
+    subscriptions: Iterable[DataId] = (),
+    poll_interval: float = 0.05,
+) -> Iterator[Callable[..., tuple[Table, DataUpdateDetails]]]:
+    """Run a session on one thread and yield its synchronous publish callable.
+
+    The worker owns the cache, transport, and callbacks for this context. External
+    publishers queue work and wait for their result. Callbacks receive both the
+    change set and publish callable, including on initialization; their publishes
+    execute directly on the worker. Do not access cache or transport concurrently.
+
+    Polling is bounded by poll_interval (seconds) to service queued publications
+    and shutdown. The transport must honor that timeout and callbacks must return
+    for shutdown to complete. Exit finishes accepted publications, stops the
+    session, and joins the thread. Worker errors fail queued publications and
+    propagate on exit; processing does not resume after failure.
+    """
+    if not isfinite(poll_interval) or poll_interval <= 0:
+        raise ValueError("Poll interval must be finite and positive")
+
+    requests: Queue[
+        tuple[Future[tuple[Table, DataUpdateDetails]], Callable[[], tuple[Table, DataUpdateDetails]]] | None
+    ] = Queue()
+    ready: Future[None] = Future()
+    finished: Future[None] = Future()
+    lock = Lock()
+    accepting = True
+    session: PollingDataFabricSession
+
+    def publish(
+        data: Table,
+        id: DataId | None = None,
+        dependencies: tuple[DataVersionId, ...] = (),
+        weak_dependencies: tuple[DataVersionId, ...] = (),
+        as_of: datetime | None = None,
+    ) -> tuple[Table, DataUpdateDetails]:
+        result: Future[tuple[Table, DataUpdateDetails]] = Future()
+        on_worker = current_thread() is thread
+        with lock:
+            if not accepting and not on_worker:
+                if finished.done():
+                    finished.result()  # Report the worker's failure if it died.
+                raise RuntimeError("Data fabric session is closed")
+            operation = partial(session.publish, data, id, dependencies, weak_dependencies, as_of)
+            if not on_worker:
+                requests.put((result, operation))
+        # The callback is already on the owner thread: waiting on the queue
+        # here would deadlock that thread against itself.
+        if on_worker:
+            return operation()
+        return result.result()
+
+    def run() -> None:
+        nonlocal accepting, session
+        error = None
+        try:
+            with PollingDataFabricSession(cache, transport) as session:
+                session.add_subscriptions(subscriptions)
+                ready.set_result(None)
+                while True:
+                    try:
+                        request = requests.get_nowait()
+                    except Empty:
+                        pass
+                    else:
+                        if request is None:
+                            break
+                        result, operation = request
+                        try:
+                            result.set_result(operation())
+                        except BaseException as exc:
+                            result.set_exception(exc)
+                            raise
+                    # Service incoming notifications between publications so
+                    # publishers cannot starve subscription callbacks.
+                    changed = session.poll(poll_interval)
+                    if changed:
+                        callback(changed, publish)
+        except BaseException as exc:
+            error = exc
+        finally:
+            with lock:
+                accepting = False
+                while not requests.empty():
+                    request = requests.get_nowait()
+                    if request:
+                        request[0].set_exception(error or RuntimeError("Data fabric session is closed"))
+                if error is None:
+                    finished.set_result(None)
+                else:
+                    finished.set_exception(error)
+                if not ready.done():
+                    ready.set_exception(error or RuntimeError("Data fabric session did not start"))
+
+    thread = Thread(target=run, name="data-fabric-session")
+    thread.start()
+    try:
+        ready.result()
+        yield publish
+    finally:
+        with lock:
+            accepting = False
+            requests.put(None)
+        thread.join()
+        finished.result()

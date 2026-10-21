@@ -34,6 +34,10 @@ Failed searches or tree loads leave current intact.
 Cache writes and notifications to every associated subscription manager are
 coordinated. Deliver an update to all associated managers before starting another
 cut operation or reading trees between those notifications.
+The cache's known latest revision and latest revision per version only advance.
+An older local notification still supplies its revision metadata, but cannot
+lower the publication head and cause a subsequent write to reuse a version.
+Subscription selections continue to be managed separately by the manager.
 
 `apply_update(update)` always updates the cache. An update for a subscribed
 data ID changes that subscription's latest revision and attempts advancement.
@@ -181,6 +185,32 @@ publication order, including local publications and dependency updates. Local
 subscriptions advance when their publication is polled. The caller drives the
 loop and coordinates delivery with cache operations; storage and transport
 errors propagate. Arrow tables remain in shared storage.
+
+`run_data_fabric_session(cache, transport, callback, subscriptions=ids)` runs the
+polling session on a worker thread and yields a thread-safe publish callable:
+
+```python
+from hgraph_fabric.data_fabric_session import run_data_fabric_session
+
+with run_data_fabric_session(cache, transport, on_update, subscriptions=["prices"]) as publish:
+    written_table, update = publish(output_table, id="result")
+```
+
+The worker starts the session, registers subscriptions, and calls
+`on_update(changes, publish)` for the initial cut and later nonempty changes,
+where `changes` is a `dict[DataId, Table]`. The callback receives the publish
+callable directly, so even the initial callback can publish before the context
+body has bound its own callable. Callbacks run on the worker. Publications
+from other threads are queued and wait for their result; a callback can use the
+publish callable directly without deadlocking. Cache and transport operations
+all run on the worker; callers must not access those objects concurrently.
+
+Context exit finishes accepted publications, stops the session and joins the
+worker. A finite positive `poll_interval` (default 0.05 seconds) bounds transport
+waits so the worker can handle publications and shutdown. Transports must honor
+timeouts and callbacks must return for shutdown to finish. Worker failures stop
+processing, release waiting publishers with the error, and propagate on context
+exit. There is no retry or recovery loop.
 
 ## Design reference
 

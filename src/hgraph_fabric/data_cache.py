@@ -163,16 +163,23 @@ class DataCache(ABC):
             revision_id = (data_id, *previous) if previous is not None else None
 
     def apply_update(self, update: DataUpdateDetails) -> None:
-        """Accept the supplied update as latest and cache its revision metadata."""
+        """Cache revision metadata and advance known heads without regressing."""
         revision_id = (update.id, *update.revision)
-        self._latest[update.id] = revision_id
+        # Local writes may already be ahead of their notifications. An older
+        # echo must not lower the head used to allocate the next version.
+        latest = max(self._latest.get(update.id, revision_id), revision_id)
+        self._latest[update.id] = latest
         self._revisions[revision_id] = DataRevisionDetails(
             dependencies=update.dependencies,
             weak_dependencies=update.weak_dependencies,
             previous_revision=update.previous_revision,
             as_of=update.as_of,
         )
-        self._latest_revisions[revision_id[:2]] = revision_id
+        version_id = revision_id[:2]
+        version_latest = latest if latest[:2] == version_id else revision_id
+        self._latest_revisions[version_id] = max(
+            self._latest_revisions.get(version_id, revision_id), version_latest,
+        )
 
     @abstractmethod
     def load_latest(self, data_id: DataId) -> DataRevisionId:

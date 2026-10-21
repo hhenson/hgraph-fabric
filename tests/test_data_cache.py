@@ -188,6 +188,35 @@ class DataCacheTests(unittest.TestCase):
             )
         self.assertEqual(self.cache.loads, [])
 
+    def test_older_update_preserves_loaded_head_and_its_revision_count(self):
+        self.cache.latest_values["prices"] = ("prices", 10, 5)
+        self.cache.latest("prices")
+        self.cache.loads.clear()
+        self.cache.apply_update(DataUpdateDetails(
+            id="prices", revision=(10, 2), previous_revision=None,
+            dependencies=(), weak_dependencies=(), as_of=AS_OF,
+        ))
+        self.assertEqual(self.cache.latest("prices"), ("prices", 10, 5))
+        self.assertEqual(self.cache.get_latest_revision(("prices", 10)), ("prices", 10, 5))
+        self.assertEqual(self.cache.get_revision(("prices", 10, 2)).as_of, AS_OF)
+        self.assertEqual(self.cache.loads, [])
+        _, update = self.cache.write(table({"price": [20]}, metadata={b"version": b"10"}),
+                                    id="prices", as_of=AS_OF)
+        self.assertEqual(update.revision, (11, 0))
+        self.assertEqual(update.previous_revision, (10, 5))
+
+    def test_older_version_echo_retains_metadata_without_regressing_either_head(self):
+        for version, count in ((10, 5), (20, 0), (10, 2)):
+            self.cache.apply_update(DataUpdateDetails(
+                id="prices", revision=(version, count), previous_revision=None,
+                dependencies=(("source", count),), weak_dependencies=(), as_of=AS_OF,
+            ))
+        self.assertEqual(self.cache.latest("prices"), ("prices", 20, 0))
+        self.assertEqual(self.cache.get_latest_revision(("prices", 10)), ("prices", 10, 5))
+        self.assertEqual(self.cache.get_latest_revision(("prices", 20)), ("prices", 20, 0))
+        self.assertEqual(self.cache.get_revision(("prices", 10, 2)).dependencies, (("source", 2),))
+        self.assertEqual(self.cache.loads, [])
+
     def test_failed_loads_are_retried(self):
         for getter, backing, key, value, kind in (
             (self.cache.latest, self.cache.latest_values, "other",
