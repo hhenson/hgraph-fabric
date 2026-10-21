@@ -1,12 +1,12 @@
 # Deep dependency transitions: adversarial review
 
-Reviewed production tree: `0bfbe78` (merged PR #17). This PR changes tests and
-review documentation only. One confirmed finding has two reproductions.
+Originally reviewed production tree: `0bfbe78` (merged PR #17). The ordering
+finding below is now addressed, and both reproductions are passing regressions.
 
-## Finding: refreshed descendants invalidate count-search ordering (P2)
+## Finding: refreshed descendants invalidate count-search ordering (addressed)
 
-`consistent_cut.py:173-178` uses the first/last expanded dependency versions to
-exclude an entire data version. Lines 147-151 use a middle expanded version to
+The reviewed `consistent_cut.py:173-178` used the first/last expanded dependency versions to
+exclude an entire data version. Lines 147-151 used a middle expanded version to
 exclude half of its revision counts. Both assume the expanded dependency values
 remain monotonic across a root's historical revisions.
 
@@ -47,11 +47,18 @@ one. It is the *refreshed expansion of historical records* that loses monotonici
 The reproductions verify the exact candidate with the independent raw-record
 oracle and verify that the selected omission is itself consistent.
 
-Proposed direction: do not prune using expanded values unless monotonicity is
-guaranteed for those histories. Use a bounded scan when descendant refresh/path
-changes can break that ordering, and check for an exact match before selecting
-an omission. This needs to cover both endpoint and middle-probe pruning. No
-production fix is included in this review PR.
+The search now visits the leading history newest first within the existing
+current/proposed bounds. It returns immediately on an exact match, since every
+newer candidate has already been checked. It remembers the first consistent
+omission, continues searching, and uses that omission only if no exact match
+exists in the bounded history. Every candidate still checks other common nodes.
+Sparse versions are reached through revision-zero links as before.
+
+This removes binary pruning of expanded values. Worst-case one-sided search is
+linear in the number of admissible revisions; already-compatible proposals and
+direct containment resolution retain their fast paths. Tests now verify that
+an exact match stops further historical reads, instead of asserting a logarithmic
+probe count that requires an ordering guarantee the model does not provide.
 
 Reproductions in `test_adversarial_transitions.py`:
 
@@ -73,11 +80,12 @@ because those are inputs to that public operation.
 | Sparse intermediate versions | 2 histories | Six version rotations through 90000001, 48 steps each; pinned old trees, new conflicts, count updates, retirement, fresh-cache previous-version/max-count walks |
 | Different roles across shared managers | 6 delivery orders | Same item is a root in one manager and a dependency in two others; count-only root advancement, soft wakeup, one-dependent gate, later dirty-tree validation |
 | Long bounded count search | 1,296 comparisons | 73 counts across three sparse versions, four-level paths, four absence patterns, nine targets, three ceilings, nine floor positions, both argument orders; exact-then-absence result checked by exhaustive enumeration |
+| Refreshed non-monotonic histories | 2,916 comparisons | All 243 five-count patterns of match/lead/omission produced by intermediate refreshes, six floors and both argument orders; newest exact wins, omission is deferred, reads stop at the exact match |
 | Fatal deep metadata errors | 4 cases | Missing dependency or internally conflicting versions at depth 12; chain/diamond; errors propagate and no current selection is published |
 
 There are **13,032 successful publication steps**, plus immediate duplicate
-notifications, the 1,296 pair comparisons, four fatal-update cases, and the two
-expected-failure reproductions. Shared-manager cases deliver each publication to
+notifications, 4,212 pair comparisons, four fatal-update cases, and the two
+now-passing reproductions. Shared-manager cases deliver each publication to
 every associated manager.
 
 Every newly committed cut is checked for pairwise consistency by the independent
@@ -108,10 +116,8 @@ An additional local exploration ran the seeded stream family for seeds 0-2047
 seed 2007's partial-root-duplicate behavior is retained in the regular pack. This
 larger exploration is separate from the default CI matrix above.
 
-The full suite has **149 tests: 147 pass and two expected failures**, both for the
-single ordering finding above. The strict adversarial runner has 42 tests and
-exposes those same two failures. Normal green CI does not mean this finding is
-fixed. Run against the installed wheel:
+The full suite has **150 passing tests with no expected failures**. The strict
+adversarial runner has 43 passing tests. Run against the installed wheel:
 
 ```sh
 python -I -m unittest discover -s tests

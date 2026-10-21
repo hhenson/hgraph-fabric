@@ -411,7 +411,6 @@ class DeepTransitionTests(unittest.TestCase):
                 self.assertEqual(current_cut(manager), before)
                 # Processing ends here. No retry or repair-after-error contract.
 
-    @unittest.expectedFailure
     def test_refreshed_historical_path_does_not_hide_an_exact_count_match(self):
         history = History()
         for version in (1, 3, 5, 7):
@@ -442,7 +441,6 @@ class DeepTransitionTests(unittest.TestCase):
         self.assertTrue(history.consistent(current_cut(fresh)))
         self.assertEqual(current_cut(fresh), exact)
 
-    @unittest.expectedFailure
     def test_refreshed_middle_probe_does_not_prune_the_matching_half(self):
         history = History()
         for version in range(1, 10):
@@ -468,3 +466,48 @@ class DeepTransitionTests(unittest.TestCase):
         fresh.get_consistent_cut()
         self.assertTrue(history.consistent(current_cut(fresh)))
         self.assertEqual(current_cut(fresh), exact)
+
+    def test_refreshed_counts_choose_newest_exact_before_newest_omission(self):
+        # 243 refreshed histories * 6 current floors * 2 argument orders.
+        # Each intermediate advances from X@1 to X@2 or X@7. The original
+        # root history is ordered; refreshing distinct paths can interleave
+        # matches, leads and omissions in any order across its older counts.
+        for values in product((None, 2, 7), repeat=5):
+            history = History()
+            for version in (1, 2, 7, 9):
+                history.add("x", version)
+            for count, value in enumerate(values):
+                if value is not None:
+                    history.add(f"m{count}", 100, dependencies=(("x", 1),))
+                history.add("a", 100, count,
+                            dependencies=() if value is None else ((f"m{count}", 100),))
+            history.add("a", 100, 5, dependencies=(("x", 9),))
+            history.add("b", 100, dependencies=(("x", 2),))
+            for count, value in enumerate(values):
+                if value is not None:
+                    history.add(f"m{count}", 100, 1, dependencies=(("x", value),))
+            for floor, reverse in product(range(6), (False, True)):
+                with self.subTest(values=values, floor=floor, reverse=reverse):
+                    cache = HistoryCache(history)
+                    left, right = DataSubscriptionGraph("a"), DataSubscriptionGraph("b")
+                    left.proposed_revision, right.proposed_revision = ("a", 100, 5), ("b", 100, 0)
+                    candidates = range(4, floor - 1, -1)
+                    exact = next((count for count in candidates if values[count] == 2), None)
+                    omitted = next((count for count in candidates if values[count] is None), None)
+                    expected = exact if exact is not None else omitted
+                    pair = (right, left) if reverse else (left, right)
+                    bounds = (("a", 100, floor), ("b", 100, 0))
+                    if reverse:
+                        bounds = bounds[::-1]
+                    if expected is None:
+                        with self.assertRaises(NoConsistentCutError):
+                            find_consistent_cut(*pair, cache, lower_bounds=bounds)
+                    else:
+                        result = find_consistent_cut(*pair, cache, lower_bounds=bounds)
+                        result = result[::-1] if reverse else result
+                        self.assertEqual(result, (("a", 100, expected), ("b", 100, 0)))
+                    loaded_counts = [revision[2] for kind, revision in cache.loads
+                                     if kind == "revision" and revision[0] == "a"]
+                    # Exact matches terminate immediately; omissions require
+                    # proving there is no exact match throughout the bound.
+                    self.assertEqual(min(loaded_counts), exact if exact is not None else floor)

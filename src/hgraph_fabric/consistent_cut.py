@@ -30,10 +30,12 @@ def find_consistent_cut(
 
     Otherwise, the first mismatching common node chooses the leading
     subscription, and the other stays fixed. Prefer matching all original
-    common nodes to omitting any; also check newly shared nodes. While a node
-    remains a dependency, both subscriptions record its changes and its
-    versions advance monotonically. If holding one side fixed cannot find an
-    alignment, search both bounded histories as an exceptional fallback. Raise
+    common nodes to omitting any; also check newly shared nodes. Search newest
+    first, returning the first exact match. Retain the newest consistent omission
+    only as a fallback after every admissible exact candidate is ruled out.
+    Refreshed descendants can make expanded histories non-monotonic even when
+    published dependency versions advance monotonically. If holding one side fixed
+    cannot find an alignment, search both bounded histories as an exceptional fallback. Raise
     LookupError if neither search finds a compatible pair.
 
     Trees loaded during the search are cached normally. No latest, proposed or
@@ -94,7 +96,6 @@ def find_consistent_cut(
         # An earlier tournament comparison may have downgraded this root.
         # Hold it fixed and search only for its version in the consuming tree.
         common = {contained[0]}
-        mismatch = contained[0]
         fixed_nodes = {contained[0]: contained[1]}
         leading_is_left = not contained_is_left
         leading = left if leading_is_left else right
@@ -112,8 +113,8 @@ def find_consistent_cut(
         if mismatch is None:
             return left_revision, right_revision
 
-        # 2. Fix the lagging graph as the target. Crossing below its version
-        #    is a lower bound, not a reason to move that fixed subscription.
+        # 2. Fix the lagging graph as the target while searching the leading
+        #    subscription's bounded history.
         if left_nodes[mismatch] > right_nodes[mismatch]:
             leading, start = left, left_revision
             fixed_nodes = right_nodes
@@ -122,78 +123,34 @@ def find_consistent_cut(
             leading, start = right, right_revision
             fixed_nodes = left_nodes
             leading_is_left = False
-    target = fixed_nodes[mismatch]
     leading_floor = lower_bounds[0 if leading_is_left else 1]
     fixed_floor = lower_bounds[1 if leading_is_left else 0]
 
     def result(revision: DataRevisionId) -> tuple[DataRevisionId, DataRevisionId]:
         return (revision, right_revision) if leading_is_left else (left_revision, revision)
 
-    def nodes_at(version: DataVersion, count: int) -> dict[DataId, DataVersion]:
-        revision = (leading.data_id, version, count)
-        return _nodes(leading.revision(revision, cache), revision)
-
-    def exact_revision(
-        version: DataVersion, low: int, high: int
-    ) -> DataRevisionId | None:
-        """Bisect revision COUNTS in this one version, with inclusive bounds."""
-        if low > high:
-            return None
-        middle = (low + high) // 2
-        nodes = nodes_at(version, middle)
-
-        # Check the target set at every probe: the contained root alone, or all
-        # shared nodes for ordinary overlap. A lag moves forward; a lead moves back.
-        conflict = _first_mismatch(nodes, fixed_nodes)
-        if conflict in common:
-            if nodes[conflict] > fixed_nodes[conflict]:
-                return exact_revision(version, low, middle - 1)
-            return exact_revision(version, middle + 1, high)
-
-        # Absence cannot tell us which half contains an exact match: a node
-        # may disappear and reappear. A newly shared conflicting node may also
-        # disappear, so it cannot safely exclude either half. Search newer first.
-        newer = exact_revision(version, middle + 1, high)
-        if newer is not None:
-            return newer
-        if conflict is None and common <= nodes.keys():
-            return leading.data_id, version, middle
-        return exact_revision(version, low, middle - 1)
-
-    # 3. The selected proposed count is the initial upper bound, even if newer
-    #    revisions exist. The lower count is zero, or the committed count when
-    #    this is the floor version. Walk revision zero to earlier versions only
-    #    while still above that floor. Its previous_revision pointer
-    #    supplies BOTH the actual previous version and its maximum count.
-    #    Never decrement a version number or bisect across different versions.
-    for version, maximum_count in _version_bounds(start, cache, leading_floor):
-        minimum_count = (
-            leading_floor[2] if leading_floor is not None and version == leading_floor[1] else 0
-        )
-        at_maximum = nodes_at(version, maximum_count).get(mismatch)
-        at_minimum = nodes_at(version, minimum_count).get(mismatch)
-        if at_maximum is not None and at_maximum < target:
-            break  # All earlier present values also lag: no exact match there.
-        if at_minimum is not None and at_minimum > target:
-            continue  # All present values in this version still lead.
-
-        # The oldest admissible count lags, matches, or omits the node. Bisect
-        # within ONE version, stopping at current's count in the floor version.
-        revision = exact_revision(version, minimum_count, maximum_count)
-        if revision is not None:
-            return result(revision)
-        if at_minimum is not None and at_minimum < target:
-            break
-
-    # 4. No exact alignment exists. Try missing-dependency candidates, newest
-    #    first, still checking the remaining nodes in the target set. Disappearance is
-    #    not monotonic, so this uncommon fallback cannot safely use binary search.
+    # 3. Walk actual revisions newest first, respecting proposed/current bounds.
+    # Revision zero links to the preceding sparse version and its maximum count;
+    # only counts within a version are consecutive.
+    #
+    # A refreshed intermediate can change an expanded history from [1, 3, 5]
+    # to [7, 3, 5]. Neither endpoints nor middle probes can then rule out a range.
+    # Visiting newest first makes the first exact match the largest admissible
+    # revision, so it can return immediately without searching older records.
+    absent = None
     for revision in _revisions_backwards(start, cache, leading_floor):
-        nodes = nodes_at(revision[1], revision[2])
+        nodes = _nodes(leading.revision(revision, cache), revision)
+        if _first_mismatch(nodes, fixed_nodes) is not None:
+            continue  # Absence of one dependency cannot excuse another conflict.
         if common <= nodes.keys():
-            continue
-        if _first_mismatch(nodes, fixed_nodes) is None:
             return result(revision)
+        if absent is None:
+            absent = revision  # Remember the newest consistent omission only.
+
+    # 4. An omission has lower precedence than every admissible exact match.
+    # Use it only after the entire bounded history has been searched.
+    if absent is not None:
+        return result(absent)
     # Independent inputs may have been consumed in different orders, leaving no
     # revision that matches the other side's complete fixed dependency vector.
     # Only after the normal search fails do we allow both sides to move. Retain
@@ -221,7 +178,7 @@ def _search_both_histories(
     Visit its history newest first, searching the leading history newest first
     at each step. Prefer preserving the original common dependencies to omitting
     them. This costs O(L * R) tree comparisons in the worst case, but does not
-    affect the normal bounded/binary search. Metadata failures propagate.
+    affect the normal one-sided search. Metadata failures propagate.
     """
     absent = None
     for fixed_revision in _revisions_backwards(fixed_start, cache, fixed_floor):

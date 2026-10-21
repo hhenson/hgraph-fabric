@@ -83,7 +83,11 @@ Revision-count changes can advance the cut but do not indicate new data and are
 excluded from the returned set.
 
 The pairwise search keeps the lagging subscription fixed, follows revision-zero
-links across sparse versions, and binary-searches counts within one version.
+links across sparse versions, and examines admissible revisions newest first.
+The first exact match returns immediately. The newest consistent omission is
+remembered, but used only after ruling out every exact match within the bounds.
+This can require a linear number of tree comparisons: refreshed descendants can
+break the ordering that binary pruning would require.
 If one subscription's root occurs in the other tree, only that root version
 needs to match; otherwise all common nodes are checked. Subscriptions record
 dependency changes while those dependencies remain present. Exact matches

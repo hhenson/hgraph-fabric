@@ -22,10 +22,11 @@ withdrawn: unexpected failures are fatal. Shared-cache delivery follows the
 coordinated contract. Those original findings have no remaining expected failures.
 
 The [deep transition review](DEEP_TRANSITION_REVIEW.md) adds 13,032 publication
-steps and 1,296 bounded pair searches. It identifies one new ordering gap with
-two expected-failure reproductions: refreshing historical descendants can break
-the expanded monotonicity assumed by binary search. The strict runner exposes
-both failures; the full suite currently has 147 passes and two expected failures.
+steps and bounded pair searches. Its ordering finding is now addressed: the
+search visits revisions newest first, returns an exact match immediately, and
+retains the newest consistent omission only after ruling out every exact match.
+The two reproductions pass, along with 2,916 additional refreshed-history cases.
+The full suite currently has 150 passing tests and no expected failures.
 
 ## Passing scenario matrix
 
