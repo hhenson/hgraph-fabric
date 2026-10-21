@@ -30,8 +30,11 @@ data ID changes that subscription's latest revision and triggers recalculation.
 With an established cut, it tries to advance subscriptions currently behind
 latest, using unchanged subscriptions as an already consistent prefix and
 inserting the candidates one at a time. Waiting peers can advance together;
-if a proposal would regress any selection, the previous cut is retained.
-Before an initial cut exists, it builds the prefix from scratch.
+the search adjusts private proposed selections while committed current selections
+and their retained graphs remain available. Only a complete consistent proposal
+that moves no subscription backwards is committed. Blocked or failed proposals
+leave current selections untouched. Before an initial cut exists, it builds the
+proposed prefix from scratch.
 It returns the `set[DataVersionId]` of subscriptions whose current data version
 advanced, including newly selected subscriptions and waiting peers. Revision
 count changes alone do not indicate new data and are excluded.

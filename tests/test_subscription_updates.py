@@ -120,6 +120,67 @@ class SubscriptionUpdateTests(unittest.TestCase):
         self.assertEqual(a.latest_revision, ("a", 200, 0))
         self.assertEqual(self.cache.latest("a"), ("a", 200, 0))
 
+    def test_update_comparisons_keep_committed_cut_and_trees_until_commit(self):
+        a, b = self.seed_pair()
+        self.manager.apply_update(self.update("x", 2, previous=(1, 0)))
+        a_update = self.update("a", 200, dependencies=(("x", 2),), previous=(100, 0))
+        original_graphs = {sub.data_id: sub.current(self.cache) for sub in (a, b)}
+
+        def compare(left, right, cache):
+            for sub in (a, b):
+                self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
+                self.assertIn((sub.data_id, 100, 0), sub._revision_graphs)
+                self.assertIs(sub.current(cache), original_graphs[sub.data_id])
+            return find_consistent_cut(left, right, cache)
+
+        with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
+            self.assertEqual(self.manager.apply_update(a_update), set())
+            for sub in (a, b):
+                self.assertIs(sub.current(self.cache), original_graphs[sub.data_id])
+            self.assertEqual(
+                self.manager.apply_update(
+                    self.update("b", 200, dependencies=(("x", 2),), previous=(100, 0))
+                ),
+                {("a", 200), ("b", 200)},
+            )
+        for sub in (a, b):
+            self.assertEqual(sub.current_revision, (sub.data_id, 200, 0))
+            self.assertNotIn((sub.data_id, 100, 0), sub._revision_graphs)
+
+    def test_failed_proposal_does_not_prune_committed_graphs(self):
+        a, b = self.seed_pair()
+        graphs = {sub.data_id: sub.current(self.cache) for sub in (a, b)}
+
+        def fail(left, right, cache):
+            for sub in (a, b):
+                self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
+                self.assertIn((sub.data_id, 100, 0), sub._revision_graphs)
+            raise OSError("Unavailable history")
+
+        with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=fail):
+            with self.assertRaises(OSError):
+                self.manager.apply_update(self.update("a", 200, previous=(100, 0)))
+        for sub in (a, b):
+            self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
+            self.assertIs(sub.current(self.cache), graphs[sub.data_id])
+        self.assertEqual(a.latest_revision, ("a", 200, 0))
+        self.assertEqual(self.cache.latest("a"), ("a", 200, 0))
+
+    def test_new_subscription_cannot_regress_an_established_current_on_update(self):
+        self.cache.apply_update(self.update("x", 1))
+        self.cache.apply_update(self.update("x", 2, previous=(1, 0)))
+        self.cache.apply_update(self.update("a", 100, dependencies=(("x", 1),)))
+        self.cache.apply_update(self.update("a", 200, dependencies=(("x", 2),), previous=(100, 0)))
+        a = self.manager.add_subscription("a")
+        self.manager.get_consistent_cut()
+        self.cache.apply_update(self.update("b", 100, dependencies=(("x", 1),)))
+        b = self.manager.add_subscription("b")
+        self.assertEqual(
+            self.manager.apply_update(self.update("b", 100, 1, dependencies=(("x", 1),))), set()
+        )
+        self.assertEqual(a.current_revision, ("a", 200, 0))
+        self.assertIsNone(b.current_revision)
+
     def test_failed_comparison_retains_update_and_allows_retry(self):
         a, b = self.seed_pair()
         update = self.update("a", 200, dependencies=(("missing", 1),), previous=(100, 0))
