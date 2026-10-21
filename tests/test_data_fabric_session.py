@@ -140,6 +140,22 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         self.session.stop()
         self.transport.stop.assert_called_once_with()
 
+    def test_context_manager_starts_and_stops_session(self):
+        with self.session as session:
+            self.assertIs(session, self.session)
+            self.transport.start.assert_called_once_with()
+            self.transport.stop.assert_not_called()
+        self.transport.stop.assert_called_once_with()
+
+    def test_context_manager_stops_without_suppressing_exception(self):
+        error = RuntimeError("Processing failed")
+        with self.assertRaises(RuntimeError) as raised:
+            with self.session:
+                raise error
+        self.assertIs(raised.exception, error)
+        self.transport.start.assert_called_once_with()
+        self.transport.stop.assert_called_once_with()
+
     def test_publish_then_poll_delivers_local_update_once(self):
         messages = deque()
         def send(update):

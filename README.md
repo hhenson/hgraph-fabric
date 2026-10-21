@@ -160,7 +160,9 @@ delivers that update to each associated session before further cut operations,
 including the publishing session when it has subscriptions.
 
 `PollingDataFabricSession(cache, transport)` adds `start()`, `stop()`, and
-`poll(timeout=None)`. Its `publish` persists first, then sends the update metadata.
+`poll(timeout=None)`. Use `with PollingDataFabricSession(cache, transport) as session:`
+to start on entry and stop on exit, including when the block raises an exception.
+Its `publish` persists first, then sends the update metadata.
 `poll` receives and applies notifications until subscribed data advances or its
 timeout expires. It returns the advanced tables, or `{}` on expiry. Timeouts are
 seconds and cover the whole call, including notifications that yield no changes;

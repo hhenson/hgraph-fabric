@@ -1,7 +1,8 @@
 from collections.abc import Iterable
 from datetime import datetime
 from time import monotonic
-from typing import Protocol
+from types import TracebackType
+from typing import Protocol, Self
 
 from pyarrow import Table
 
@@ -83,6 +84,18 @@ class PollingDataFabricSession(DataFabricSession):
 
     def stop(self) -> None:
         self._transport.stop()
+
+    def __enter__(self) -> Self:
+        self.start()
+        return self
+
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        self.stop()
 
     def poll(self, timeout: float | None = None) -> dict[DataId, Table]:
         """Receive until data advances or the total timeout expires ({}).
