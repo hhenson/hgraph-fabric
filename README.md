@@ -145,6 +145,43 @@ The initial implementation milestone is a working Python core with in-memory
 storage. Durable storage adapters, Kafka and hgraph integration come later.
 Individual components and their APIs will be agreed as we build them.
 
+## Sessions
+
+`DataFabricSession(cache)` combines a subscription manager and the cache's
+publication API. Register roots with `add_subscription` or `add_subscriptions`.
+`get_consistent_cut()` returns a `dict[DataId, Table]` for the selected cut;
+`apply_update(update)` returns that mapping for only the subscriptions whose
+data versions advanced. Tables are loaded through the cache after selection.
+Blocked updates and revision-count-only changes return an empty mapping.
+
+`publish(data, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
+returns the cache's `(Table, DataUpdateDetails)` result. The external driver
+delivers that update to each associated session before further cut operations,
+including the publishing session when it has subscriptions.
+
+`PollingDataFabricSession(cache, transport)` adds `start()`, `stop()`, and
+`poll(timeout=None)`. Use `with PollingDataFabricSession(cache, transport) as session:`
+to start on entry and stop on exit, including when the block raises an exception.
+Its `publish` persists first, then sends the update metadata.
+If any registered subscription has no current revision, `poll` first initializes
+and returns the full consistent cut without receiving a message. This also applies
+to subscriptions added after polling has begun; the whole cut is returned because
+adding a root can change the versions selected for existing roots.
+If no initial consistent cut is available, polling continues receiving within
+the remaining timeout so a later publication can establish it. Storage and
+malformed metadata errors still propagate.
+`poll` receives and applies notifications until subscribed data advances or its
+timeout expires. It returns the advanced tables, or `{}` on expiry. Timeouts are
+seconds and cover the whole call, including notifications that yield no changes;
+`None` waits indefinitely and zero makes one nonblocking attempt.
+
+The `DataFabricTransport` protocol defines `start`, `stop`, `poll` and `send`.
+Adapters handle serialization and routing and deliver applicable updates in
+publication order, including local publications and dependency updates. Local
+subscriptions advance when their publication is polled. The caller drives the
+loop and coordinates delivery with cache operations; storage and transport
+errors propagate. Arrow tables remain in shared storage.
+
 ## Design reference
 
 The existing implementation lives in
