@@ -120,7 +120,8 @@ class DataSubscriptionGraphTests(unittest.TestCase):
                 ])
                 cache.reset_mock()
                 self.assertIs(accessor(cache), graph)
-                self.assertEqual(cache.mock_calls, [])
+                cache.get_revision.assert_not_called()
+                cache.get_latest_revision.assert_called_once_with(("source", 1))
 
     def test_rejects_revision_for_another_data_id(self):
         subscription = DataSubscriptionGraph("prices")
@@ -176,7 +177,8 @@ class DataSubscriptionGraphTests(unittest.TestCase):
         cache.get_data.assert_not_called()
         cache.reset_mock()
         self.assertIs(subscription.revision(("root", 1, 7), cache), graph)
-        self.assertEqual(cache.mock_calls, [])
+        cache.get_revision.assert_not_called()
+        self.assertEqual(cache.get_latest_revision.call_count, 4)
 
     def test_cycles_terminate_and_do_not_reselect_the_explicit_root_revision(self):
         subscription = DataSubscriptionGraph("root")

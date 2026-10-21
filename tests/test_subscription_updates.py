@@ -159,11 +159,11 @@ class SubscriptionUpdateTests(unittest.TestCase):
 
                 observed = []
 
-                def compare(left, right, cache):
+                def compare(left, right, cache, **kwargs):
                     observed.append((left.data_id, right.data_id))
                     for sub in self.manager._subscriptions.values():
                         self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
-                    return find_consistent_cut(left, right, cache)
+                    return find_consistent_cut(left, right, cache, **kwargs)
 
                 with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
                     advanced = self.manager.apply_update(
@@ -227,12 +227,12 @@ class SubscriptionUpdateTests(unittest.TestCase):
         a_update = self.update("a", 200, dependencies=(("x", 2),), previous=(100, 0))
         original_graphs = {sub.data_id: sub.current(self.cache) for sub in (a, b)}
 
-        def compare(left, right, cache):
+        def compare(left, right, cache, **kwargs):
             for sub in (a, b):
                 self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
                 self.assertIn((sub.data_id, 100, 0), sub._revision_graphs)
                 self.assertIs(sub.current(cache), original_graphs[sub.data_id])
-            return find_consistent_cut(left, right, cache)
+            return find_consistent_cut(left, right, cache, **kwargs)
 
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
             self.assertEqual(self.manager.apply_update(a_update), set())
@@ -252,7 +252,7 @@ class SubscriptionUpdateTests(unittest.TestCase):
         a, b = self.seed_pair()
         graphs = {sub.data_id: sub.current(self.cache) for sub in (a, b)}
 
-        def fail(left, right, cache):
+        def fail(left, right, cache, **kwargs):
             for sub in (a, b):
                 self.assertEqual(sub.current_revision, (sub.data_id, 100, 0))
                 self.assertIn((sub.data_id, 100, 0), sub._revision_graphs)
