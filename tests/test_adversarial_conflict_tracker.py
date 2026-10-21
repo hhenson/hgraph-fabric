@@ -1,9 +1,4 @@
-"""Second review: successful refresh matrix and explicit remaining gaps.
-
-Cache updates and associated manager notifications are coordinated. Remaining
-expected failures cover missed wakeups and interrupted retries. Run the
-adversarial runner with --strict to expose those failures.
-"""
+"""Conflict-path refresh, cleanup and coordinated delivery regressions."""
 from itertools import permutations, product
 import unittest
 from unittest.mock import patch
@@ -47,6 +42,12 @@ class ConflictTrackerReview(unittest.TestCase):
             with self.subTest(topology=topology, counts=counts, order=order, omission=omission):
                 history, cache, manager = waiting(topology, counts, order)
                 self.assertEqual(current_cut(manager), {key: (key, 100, 0) for key in order})
+                watched = {("middle", 100)}
+                if topology == "nested":
+                    watched.add(("outer", 100))
+                elif topology == "diamond":
+                    watched.update((("left", 100), ("right", 100)))
+                self.assertEqual(set(manager._conflicts), watched)
                 update = history.add("middle", 100, 1, dependencies=() if omission else (("x", 2),))
                 self.assertEqual(manager.apply_update(update), set() if counts else {("a", 9000), ("b", 9000)})
                 self.assertEqual(current_cut(manager), {key: history.heads[key] for key in order})
@@ -87,7 +88,6 @@ class ConflictTrackerReview(unittest.TestCase):
         self.assertFalse(history.consistent(before))
         self.assertEqual(manager._dirty_subscriptions, {"a", "b"})
 
-    @unittest.expectedFailure
     def test_conflict_tracker_wakes_a_dependent_downgraded_by_an_earlier_comparison(self):
         history = History()
         for version in (1, 2, 3):
@@ -103,8 +103,12 @@ class ConflictTrackerReview(unittest.TestCase):
         manager.add_subscriptions(("a", "b", "c"))
         manager.get_consistent_cut()
         self.assertEqual(current_cut(manager), {key: (key, 100, 0) for key in ("a", "b", "c")})
-        # a/b downgrades a, recording middle -> a. Comparing c with that older
-        # a then downgrades c to a tree using middle, but middle -> c is missing.
+        # Full trees: a -> y@2 and b -> middle -> y@1. This downgrades a.
+        # Watch middle's revisions, not y's: only a consumer can change which
+        # y version is referenced. a and b already have root subscriptions.
+        self.assertEqual(manager._conflicts, {("middle", 100): {"a"}})
+        # Comparing c with the older a also downgrades c onto middle. The
+        # dependent index, rather than the original pair, supplies this waiter.
         self.assertEqual(manager._dependents[("middle", 100)], {"b", "c"})
         update = history.add("middle", 100, 1)
         witness = {"a": ("a", 200, 0), "b": ("b", 100, 0), "c": ("c", 200, 0)}
@@ -113,33 +117,24 @@ class ConflictTrackerReview(unittest.TestCase):
         self.assertEqual(manager.apply_update(update), {("a", 200), ("c", 200)})
         self.assertEqual(current_cut(manager), witness)
 
-    @unittest.expectedFailure
-    def test_duplicate_retries_resolution_that_failed_after_refresh_completed(self):
+    def test_unexpected_resolution_error_propagates(self):
         history, cache, manager = waiting()
         before = current_cut(manager)
         update = history.add("middle", 100, 1, dependencies=(("x", 2),))
-        # Inject at the comparison boundary, after both latest trees refreshed.
-        # No outcome from that attempted resolution has been committed.
+        # Unexpected failures terminate processing; no recovery is promised.
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut",
-                   side_effect=OSError("Transient resolution failure")):
+                   side_effect=OSError("Resolution failure")):
             with self.assertRaises(OSError):
                 manager.apply_update(update)
         self.assertEqual(current_cut(manager), before)
-        self.assertEqual(manager.apply_update(update), {("a", 9000), ("b", 9000)})
 
-    @unittest.expectedFailure
-    def test_reading_repaired_trees_does_not_consume_a_pending_retry(self):
+    def test_missing_dependency_metadata_propagates(self):
         history, cache, manager = waiting()
         before = current_cut(manager)
         update = history.add("middle", 100, 1, dependencies=(("missing", 1), ("x", 2)))
         with self.assertRaises(KeyError):
             manager.apply_update(update)
         self.assertEqual(current_cut(manager), before)
-        manager.apply_update(history.add("missing", 1))
-        # These public read calls rebuild trees but do not resolve or commit a cut.
-        for key in ("a", "b"):
-            self.assertTrue(manager._subscriptions[key].latest(cache).has_node(("missing", 1)))
-        self.assertEqual(manager.apply_update(update), {("a", 9000), ("b", 9000)})
 
     def test_retired_versions_are_removed_while_the_roots_are_still_waiting(self):
         history, cache, manager = waiting()

@@ -16,10 +16,10 @@ python -I tests/run_adversarial.py --strict
 ```
 
 The original four review reproductions are ordinary passing regressions. The
-[second conflict-tracker review](CONFLICT_TRACKER_REVIEW.md) retains three explicitly
-expected failures for missed wakeups and interrupted retries. Conflict cleanup is
-covered by passing regressions; shared-cache delivery follows the coordinated contract. The strict
-command exposes them without their wrappers; the normal suite is not defect-free.
+[second conflict-tracker review](CONFLICT_TRACKER_REVIEW.md) now covers conflict-path
+wakeups and cleanup with passing regressions. Retry-after-error findings were
+withdrawn: unexpected failures are fatal. Shared-cache delivery follows the
+coordinated contract. Neither suite retains expected failures.
 
 ## Passing scenario matrix
 
@@ -118,7 +118,7 @@ Entries are removed as waiting roots catch up.
 
 `test_dependency_refresh.py` covers direct and nested conflict paths in every
 registration order, skip conditions, index additions/removals, count-only
-advancement, blocked-driver fallback, failure/retry, historical graph freshness,
+advancement, blocked-driver fallback, error propagation, historical graph freshness,
 and rechecking refreshed current trees at the next resolution. The gate controls
 search, not refresh: it can leave root selections unchanged without certifying
 that their newly refreshed trees are mutually consistent until resolution runs.

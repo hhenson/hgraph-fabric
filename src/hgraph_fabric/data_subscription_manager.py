@@ -60,9 +60,12 @@ class DataSubscriptionManager:
             # Refreshing trees does not itself request a tournament. Wake only
             # recorded conflicts shared by at least two dependent subscriptions,
             # with an affected subscription still waiting behind latest.
-            if not affected or len(dependents) < 2:
+            if not affected or len(dependents) < 2 or revision[:2] not in self._conflicts:
                 return set()
-            waiting = dependents & self._conflicts.get(revision[:2], set())
+            # A later comparison can downgrade another dependent onto this
+            # path. The original pair identifies the conflict, not every root
+            # that can now drive progress when the path changes.
+            waiting = affected
             for data_id, sub in self._subscriptions.items():
                 if data_id in waiting and sub.current_revision != sub.latest_revision:
                     before = sub.current_revision
@@ -117,7 +120,7 @@ class DataSubscriptionManager:
         self._subscription_dependencies[sub.data_id] = dependencies
 
     def _track_conflicts(self, left: DataSubscriptionGraph, right: DataSubscriptionGraph) -> None:
-        """Watch the paths to conflicting nodes, not unrelated graph branches."""
+        """Watch revisions that can change the paths to a version mismatch."""
         graphs = left.proposed_graph(self._cache), right.proposed_graph(self._cache)
         nodes = [dict(graph.nodes()) | {sub.data_id: sub.proposed_revision[1]}
                  for graph, sub in zip(graphs, (left, right))]
@@ -129,15 +132,21 @@ class DataSubscriptionManager:
             common = nodes[0].keys() & nodes[1].keys()
         conflicts = {key for key in common if nodes[0][key] != nodes[1][key]}
         for graph, sub in zip(graphs, (left, right)):
-            pending = list(conflicts)
+            # Changing the mismatched node's revision cannot change its data
+            # version. Watch its consumers instead: A -> Y versus B -> M -> Y
+            # requires A, B and M notifications. A/B are already subscriptions,
+            # so only M needs a soft revision watch.
+            pending = [parent for key in conflicts if key != sub.data_id
+                       for parent in graph.predecessors(key)]
             visited = set()
             while pending:
                 key = pending.pop()
                 if key in visited or key == sub.data_id:
                     continue
                 visited.add(key)
-                version = graph.get_data_version_id(key)
-                self._conflicts.setdefault(version, set()).update((left.data_id, right.data_id))
+                if key not in self._subscriptions:
+                    version = graph.get_data_version_id(key)
+                    self._conflicts.setdefault(version, set()).update((left.data_id, right.data_id))
                 pending.extend(graph.predecessors(key))
 
     def get_consistent_cut(self) -> set[DataVersionId]:

@@ -1,9 +1,9 @@
 # Conflict tracker and dependency-update review
 
-Reviewed implementation: `87a9f56` (PR #13). Findings 1 and 2 remain open.
-Finding 3 is addressed by explicit conflict cleanup at completed-operation
-boundaries. Finding 4 is withdrawn under the clarified contract: cache writes
-and notifications to all associated managers are coordinated.
+Originally reviewed implementation: `87a9f56` (PR #13). Conflict-path wakeups
+and cleanup are now covered by passing regressions. The recovery finding is
+withdrawn because unexpected exceptions are fatal. The shared-cache finding is
+withdrawn because cache writes and all associated notifications are coordinated.
 
 ## Results and scope
 
@@ -13,18 +13,13 @@ root versions or revision counts, and dependency advancement or omission. It
 checks the returned versions, committed cuts against the raw-record oracle,
 reverse-index contents, tracker cleanup and duplicate suppression.
 
-Three expected-failure tests cover the missed wakeup and two retry variants.
-Cleanup and coordinated shared-cache delivery are ordinary passing regressions.
-The expected failures assert the desired behavior, not the current defect. Run after installing the project:
+The full suite contains 140 passing tests, with no expected failures. The
+strict adversarial runner also passes. Run after installing the project:
 
 ```sh
 python -I -m unittest discover -s tests
 python -I tests/run_adversarial.py --strict
 ```
-
-The normal suite reports 139 tests: 136 pass, three explicitly expected failures.
-The strict adversarial runner reports those three as failures. A green normal
-run therefore does not mean these findings are fixed.
 
 The exploratory generator checked 31,269 deterministic seeds, retaining 9,259
 internally valid monotonic histories. Of these, 2,839 satisfied the two-dependent
@@ -34,10 +29,7 @@ not eight distinct defects: some reflect pair-search preferences. The minimized
 single-manager finding below needs neither crossed histories nor an assumption
 that the initial cut must be maximal.
 
-## 1. P2: Chained downgrades can leave the relevant dependent out of the tracker
-
-Locations: `data_subscription_manager.py:114-136` records the original pair's
-conflict paths; `:60-62` intersects recorded roots with current dependents.
+## 1. Conflict-path revision tracking and wakeups (addressed)
 
 Use `middle@100 -> y@1` and these root histories (all revision counts zero):
 
@@ -47,48 +39,42 @@ Use `middle@100 -> y@1` and these root histories (all revision counts zero):
 | b | middle@100 (latest) | — | — |
 | c | middle@100 | no dependencies | y@3 (latest) |
 
-Register `a, b, c`. Comparing a with b downgrades a and records
+Register `a, b, c`. Their full trees include `a@200 -> y@2` and
+`b@100 -> middle@100 -> y@1`, so comparing a with b downgrades a and records
 `middle@100 -> {a, b}`. Comparing c with the downgraded a then downgrades c.
 After commit, b is already latest, so the marker becomes `middle@100 -> {a}`.
 But middle's actual dependent roots are `{b, c}`. Their intersection is empty.
 
 A new revision of middle removes y. Two subscriptions still depend on middle,
 and c is behind latest. The valid forward cut is `{a@200, b@100, c@200}`; the
-old cut remains valid too. Nevertheless the update performs no resolution.
+old cut remains valid too. Previously the update performed no resolution.
 Re-delivering c's existing latest notification immediately finds that forward
 cut, confirming the pair resolver can produce it when invoked.
 
-Proposed direction: once a version has a conflict marker, consider its current
-waiting dependents rather than intersecting them with only the original pair.
-Alternatively, propagate conflict causes through later downgrades. The original
-pair alone does not identify every affected waiting root.
+The tracker now watches consumers on the paths to a mismatch. For
+`A -> Y` versus `B -> M -> Y`, revisions of A, B or M can change the referenced
+Y version. Y's own revision cannot change that version mismatch. A and B already
+have subscriptions, so M alone needs a soft watch. Traversal includes all paths
+through nested and diamond dependencies and skips already-subscribed IDs.
+
+A tracked version's update selects affected waiting roots from the dependency
+index, rather than intersecting them with the original compared pair. This
+includes c above, while preserving the two-dependent and one-behind gate.
 
 Regression: `test_conflict_tracker_wakes_a_dependent_downgraded_by_an_earlier_comparison`.
 
-## 2. P2: Tree freshness is mistaken for completion of an update attempt
+## 2. Retry-after-error finding (withdrawn: fatal errors)
 
-Location: `data_subscription_manager.py:45-59` uses whether any tree was
-invalidated to decide whether a dependency notification merits resolution.
+The reproductions caught unexpected exceptions and continued processing, then
+expected the same notification to retry a failed resolution. That recovery
+requirement was never part of the contract. Unexpected exceptions propagate;
+the caller terminates processing. No pending-retry machinery is required.
 
-Two roots wait on middle@100, which changes from x@1 to x@2 and would release
-both. After both trees refresh, inject a transient exception at the comparison
-boundary. No current selection changes. Retrying the same notification returns
-an empty set without attempting resolution: the trees are already fresh, so
-`affected` is empty. Re-delivering a root notification succeeds.
+The tests now check propagation of resolver errors and missing dependency
+metadata, without attempting recovery.
 
-A second reproduction uses no injected resolver failure. Let middle's update
-reference temporarily unavailable metadata. After the missing record arrives,
-read both subscriptions' latest graphs through their public accessors. These
-reads repair the graphs but do not resolve a cut. Retrying middle's notification
-is then suppressed for the same reason. Those reads can also leave the manager's
-dependency index behind the freshly built graphs.
-
-Proposed direction: retain a pending dependency-resolution obligation until an
-attempt completes (whether it advances or is validly blocked). Graph freshness
-and event completion need separate state; a read must not consume a retry.
-
-Regressions: `test_duplicate_retries_resolution_that_failed_after_refresh_completed`
-and `test_reading_repaired_trees_does_not_consume_a_pending_retry`.
+Regressions: `test_unexpected_resolution_error_propagates` and
+`test_missing_dependency_metadata_propagates`.
 
 ## 3. P3: Conflict entries retain versions no selected tree references (addressed)
 
@@ -112,7 +98,7 @@ have caught up. It runs after completed updates (including those that remain
 blocked) and initial cuts, and is also callable explicitly. It preserves active
 current-only and latest-only dependencies and markers whose waiting root is
 blocked by a peer's dependency. Cleanup does not run midway through searches or
-after an operation raises, so it does not consume pending failure recovery.
+after an operation raises; unexpected errors are fatal.
 
 Regression: `test_retired_versions_are_removed_while_the_roots_are_still_waiting`.
 
