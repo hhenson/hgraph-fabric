@@ -26,7 +26,11 @@ steps and bounded pair searches. Its ordering finding is now addressed: the
 search visits revisions newest first, returns an exact match immediately, and
 retains the newest consistent omission only after ruling out every exact match.
 The two reproductions pass, along with 2,916 additional refreshed-history cases.
-The full suite currently has 150 passing tests and no expected failures.
+The [containment transition review](CONTAINMENT_TRANSITION_REVIEW.md) adds changing
+topologies and candidate-specific containment cases. It exposes inconsistent
+omission acceptance and missed historical containment matches. The full suite
+now has 159 tests: 154 pass and five are expected-failure reproductions. Strict
+mode exposes those five failures; they remain unresolved in production.
 
 ## Passing scenario matrix
 
@@ -42,9 +46,8 @@ The full suite currently has 150 passing tests and no expected failures.
 | **Total** | **41,120** | Scenarios, not 37,520 distinct topology shapes |
 
 The live-stream cases check every update and its duplicate, not just the final
-cut. An additional fault-injection test fails each metadata-read position of a
-history search in turn, verifies committed selections and retained current
-objects survive, then retries successfully.
+cut. Fatal metadata-error tests check propagation and that no new current
+selection is published; they do not require retry or recovery after an error.
 
 `adversarial_cases.py` contains the independent oracle. It walks raw metadata,
 scans version-specific revision records and checks pair compatibility without
