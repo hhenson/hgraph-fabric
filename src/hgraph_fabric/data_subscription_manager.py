@@ -38,7 +38,7 @@ class DataSubscriptionManager:
         current = {key: sub.current_revision for key, sub in self._subscriptions.items()}
         if current != self._consistent_revisions:
             # New subscriptions (or externally changed selections) need an
-            # initial complete tournament before we can reuse a validated cut.
+            # initial complete stabilization before we can reuse a validated cut.
             self.get_consistent_cut()
         else:
             # Try every root held behind latest: this update may unlock peers that
@@ -48,7 +48,7 @@ class DataSubscriptionManager:
                 if sub.latest_revision is not None and sub.current_revision < sub.latest_revision
             }
             if candidates:
-                self._run_tournament(candidates)
+                self._stabilize_cut(candidates)
 
         # Report the final selections, including peers unlocked by this update.
         # A higher revision count alone does not represent new data.
@@ -59,10 +59,10 @@ class DataSubscriptionManager:
         }
 
     def get_consistent_cut(self) -> set[DataVersionId]:
-        """Initialize all roots to latest and run a complete pairwise tournament."""
-        return self._run_tournament()
+        """Initialize all roots to latest and build a consistent prefix."""
+        return self._stabilize_cut()
 
-    def _run_tournament(self, candidates: set[DataId] | None = None) -> set[DataVersionId]:
+    def _stabilize_cut(self, candidates: set[DataId] | None = None) -> set[DataVersionId]:
         subscriptions = tuple(self._subscriptions.values())
         for subscription in subscriptions:
             if subscription.latest_revision is None:
@@ -71,40 +71,52 @@ class DataSubscriptionManager:
         try:
             # A full search initializes everyone. An update only proposes
             # forward moves for the subscriptions currently behind latest.
-            active = {
+            active = [
                 i for i, sub in enumerate(subscriptions)
                 if candidates is None or sub.data_id in candidates
-            }
+            ]
             for i in active:
                 subscriptions[i].current_revision = subscriptions[i].latest_revision
 
-            # Other pairs were validated in the preceding cut and have not
-            # changed. Revisit only pairs touching a candidate or a later change.
-            queued = {
-                (min(i, j), max(i, j))
-                for i in active for j in range(len(subscriptions)) if i != j
-            }
-            pending = deque(sorted(queued))
-            while pending:
-                pair = pending.popleft()
-                queued.remove(pair)
-                i, j = pair
-                left, right = subscriptions[i], subscriptions[j]
-                revisions = find_consistent_cut(left, right, self._cache)
-                changed = []
-                for index, revision in zip(pair, revisions):
-                    if subscriptions[index].current_revision != revision:
-                        subscriptions[index].current_revision = revision
-                        changed.append(index)
-                for index in changed:
-                    for other in range(len(subscriptions)):
-                        if other == index:
-                            continue
-                        revisit = (min(index, other), max(index, other))
-                        # The pair just returned is already consistent.
-                        if revisit != pair and revisit not in queued:
-                            pending.append(revisit)
-                            queued.add(revisit)
+            # Unchanged subscriptions already form a consistent prefix on an
+            # update. A full search starts with an empty prefix. Preserve the
+            # registration order when inserting candidates and comparing pairs.
+            prefix = [
+                i for i, sub in enumerate(subscriptions)
+                if candidates is not None and sub.data_id not in candidates
+            ]
+            for incoming in active:
+                pending = deque(
+                    (min(incoming, other), max(incoming, other)) for other in prefix
+                )
+                queued = set(pending)
+                prefix.append(incoming)
+                while pending:
+                    pair = pending.popleft()
+                    queued.remove(pair)
+                    i, j = pair
+                    revisions = find_consistent_cut(subscriptions[i], subscriptions[j], self._cache)
+                    changed = []
+                    for index, revision in zip(pair, revisions):
+                        if subscriptions[index].current_revision != revision:
+                            subscriptions[index].current_revision = revision
+                            changed.append(index)
+
+                    # Equality preserves earlier comparisons. Moving either
+                    # side backwards invalidates its comparisons throughout
+                    # this prefix, including those with the incoming item.
+                    for index in changed:
+                        for other in prefix:
+                            if other == index:
+                                continue
+                            revisit = (min(index, other), max(index, other))
+                            # This pair was just resolved; pending pairs already
+                            # observe the changed selection when they execute.
+                            if revisit != pair and revisit not in queued:
+                                pending.append(revisit)
+                                queued.add(revisit)
+                # Every pair in the enlarged prefix now agrees. Only then may
+                # the next subscription participate in comparisons.
 
             if candidates is not None and any(
                 sub.current_revision < old for sub, old in zip(subscriptions, previous)

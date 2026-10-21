@@ -149,7 +149,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         self.assertEqual(a.current_revision, ("a", 2, 0))
         self.assertIsNone(b.current_revision)
 
-    def test_later_comparison_revisits_an_earlier_pair(self):
+    def test_existing_item_rollback_stabilizes_prefix_before_next_insertion(self):
         for data_id in ("x", "y"):
             for version in (1, 2):
                 self.add_revision(data_id, version)
@@ -158,12 +158,54 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         self.add_revision("b", 100, 0, (("x", 1),))
         self.add_revision("b", 100, 1, (("x", 2),))
         self.add_revision("c", 100, 0, (("y", 1),))
-        self.manager.add_subscriptions(["a", "b", "c"])
+        self.add_revision("d", 100)
+        self.manager.add_subscriptions(["a", "b", "c", "d"])
         # a/b initially agree on x=2. Matching a/c rolls a back to x=1,y=1,
         # invalidating a/b; b/c have no overlap and cannot repair that pair.
+        def compare(left, right, cache):
+            if right.data_id == "d":
+                for data_id in ("a", "b", "c"):
+                    self.assertEqual(
+                        self.manager._subscriptions[data_id].current_revision, (data_id, 100, 0)
+                    )
+            return find_consistent_cut(left, right, cache)
+
+        with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
+            self.assertEqual(
+                self.manager.get_consistent_cut(), {(data_id, 100) for data_id in ("a", "b", "c", "d")}
+            )
+        for data_id, subscription in self.manager._subscriptions.items():
+            self.assertEqual(subscription.current_revision, (data_id, 100, 0))
+
+    def test_incoming_item_rollback_rechecks_previously_matching_item(self):
+        for data_id in ("x", "y"):
+            for version in (1, 2):
+                self.add_revision(data_id, version)
+        self.add_revision("a", 100, 0, (("x", 1),))
+        self.add_revision("a", 100, 1, (("x", 2),))
+        self.add_revision("b", 100, 0, (("y", 1),))
+        for count, (x, y) in enumerate(((1, 1), (1, 2), (2, 2))):
+            self.add_revision("c", 100, count, (("x", x), ("y", y)))
+        self.manager.add_subscriptions(["a", "b", "c"])
+        # a/b form a consistent prefix. Incoming c first matches a on x=2,
+        # then b lowers c to x=1,y=1. Rechecking a/c must now lower a too.
         self.assertEqual(self.manager.get_consistent_cut(), {("a", 100), ("b", 100), ("c", 100)})
         for data_id, subscription in self.manager._subscriptions.items():
             self.assertEqual(subscription.current_revision, (data_id, 100, 0))
+
+    def test_matching_prefix_checks_each_pair_once(self):
+        self.add_revision("source", 1)
+        for data_id in ("a", "b", "c", "d"):
+            self.add_revision(data_id, 100, dependencies=(("source", 1),))
+        self.manager.add_subscriptions(["a", "b", "c", "d"])
+        with patch(
+            "hgraph_fabric.data_subscription_manager.find_consistent_cut", wraps=find_consistent_cut
+        ) as compare:
+            self.manager.get_consistent_cut()
+        self.assertEqual(
+            [(args[0].data_id, args[1].data_id) for args, _ in compare.call_args_list],
+            [("a", "b"), ("a", "c"), ("b", "c"), ("a", "d"), ("b", "d"), ("c", "d")],
+        )
 
     def test_every_run_initializes_all_currents_before_comparing(self):
         self.add_revision("source", 1)
