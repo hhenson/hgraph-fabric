@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import unittest
 
 from pyarrow import table
@@ -6,14 +7,17 @@ from hgraph_fabric.data_structures import DataRevisionDetails
 from test_data_cache import MemoryDataCache
 
 
+AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
+
+
 class DataCacheHistoryTests(unittest.TestCase):
     def setUp(self):
         self.cache = MemoryDataCache()
         self.cache.latest_values["prices"] = ("prices", 9000, 7)
         self.cache.revision_values.update({
-            ("prices", 9000, 0): DataRevisionDetails((), (), (100, 23)),
-            ("prices", 100, 0): DataRevisionDetails((), (), (3, 0)),
-            ("prices", 3, 0): DataRevisionDetails((), (), None),
+            ("prices", 9000, 0): DataRevisionDetails((), (), (100, 23), as_of=AS_OF),
+            ("prices", 100, 0): DataRevisionDetails((), (), (3, 0), as_of=AS_OF),
+            ("prices", 3, 0): DataRevisionDetails((), (), None, as_of=AS_OF),
         })
         self.expected = [("prices", 9000, 7), ("prices", 100, 23), ("prices", 3, 0)]
 
@@ -22,7 +26,7 @@ class DataCacheHistoryTests(unittest.TestCase):
         self.cache.latest("prices")
         self.cache.data_values[("payload-only", 2)] = table({"x": []})
         self.cache.get_version(("payload-only", 2))
-        self.cache.revision_values[("revision-only", 3, 2)] = DataRevisionDetails((), (), None)
+        self.cache.revision_values[("revision-only", 3, 2)] = DataRevisionDetails((), (), None, as_of=AS_OF)
         self.cache.get_revision(("revision-only", 3, 2))
         self.cache.loads.clear()
         expected = {"prices", "payload-only", "revision-only"}
@@ -94,7 +98,7 @@ class DataCacheHistoryTests(unittest.TestCase):
                 with self.subTest(previous=previous, peek=peek):
                     cache = MemoryDataCache()
                     cache.latest_values["prices"] = ("prices", 9000, 7)
-                    cache.revision_values[("prices", 9000, 0)] = DataRevisionDetails((), (), previous)
+                    cache.revision_values[("prices", 9000, 0)] = DataRevisionDetails((), (), previous, as_of=AS_OF)
                     if peek:
                         cache.latest("prices")
                         cache.get_revision(("prices", 9000, 0))

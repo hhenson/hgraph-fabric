@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -5,6 +6,9 @@ from hgraph_fabric.consistent_cut import find_consistent_cut
 from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_structures import DataRevisionDetails
 from hgraph_fabric.data_subscription_graph import DataSubscriptionGraph
+
+
+AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 class ConsistentCutTests(unittest.TestCase):
@@ -18,9 +22,9 @@ class ConsistentCutTests(unittest.TestCase):
 
     def record(self, data_id, version, count=0, dependencies=None, previous=None):
         revision = (data_id, version, count)
-        self.revisions[revision] = DataRevisionDetails(dependencies, None, previous)
+        self.revisions[revision] = DataRevisionDetails(dependencies, None, previous, as_of=AS_OF)
         for dependency in dependencies or ():
-            self.revisions.setdefault((*dependency, 0), DataRevisionDetails(None, None, None))
+            self.revisions.setdefault((*dependency, 0), DataRevisionDetails(None, None, None, as_of=AS_OF))
         return revision
 
     def subscription(self, revision):

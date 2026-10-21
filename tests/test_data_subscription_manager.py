@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import unittest
 from unittest.mock import Mock, call, patch
 
@@ -5,6 +6,9 @@ from hgraph_fabric.consistent_cut import find_consistent_cut
 from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_structures import DataRevisionDetails
 from hgraph_fabric.data_subscription_manager import DataSubscriptionManager
+
+
+AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 class DataSubscriptionManagerTests(unittest.TestCase):
@@ -21,7 +25,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
 
     def add_revision(self, data_id, version, count=0, dependencies=None, previous=None):
         revision_id = (data_id, version, count)
-        self.revisions[revision_id] = DataRevisionDetails(dependencies, None, previous)
+        self.revisions[revision_id] = DataRevisionDetails(dependencies, None, previous, as_of=AS_OF)
         self.latest[data_id] = max(self.latest.get(data_id, revision_id), revision_id)
         return revision_id
 

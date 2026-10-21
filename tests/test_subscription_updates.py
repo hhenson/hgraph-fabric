@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 import unittest
 from unittest.mock import patch
 
@@ -5,6 +6,9 @@ from hgraph_fabric.consistent_cut import find_consistent_cut
 from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_structures import DataUpdateDetails
 from hgraph_fabric.data_subscription_manager import DataSubscriptionManager
+
+
+AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 class UpdateOnlyCache(DataCache):
@@ -37,7 +41,7 @@ class SubscriptionUpdateTests(unittest.TestCase):
     def update(self, data_id, version, count=0, dependencies=None, previous=None):
         return DataUpdateDetails(
             id=data_id, revision=(version, count),
-            dependencies=dependencies, weak_dependencies=None, previous_revision=previous,
+            dependencies=dependencies, weak_dependencies=None, previous_revision=previous, as_of=AS_OF,
         )
 
     def seed_pair(self):
