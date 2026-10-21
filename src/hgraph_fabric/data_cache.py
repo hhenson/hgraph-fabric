@@ -22,6 +22,22 @@ class DataCache(ABC):
         self._revisions: dict[DataRevisionId, DataRevisionDetails] = {}
         self._latest_revisions: dict[DataVersionId, DataRevisionId] = {}
 
+    def peek_latest(self, data_id: DataId) -> DataRevisionId | None:
+        """Return cached latest for an ID, or None, without loading."""
+        return self._latest.get(data_id)
+
+    def peek_version(self, version_id: DataVersionId) -> Table | None:
+        """Return a cached table, or None, without loading."""
+        return self._data.get(version_id)
+
+    def peek_revision(self, revision_id: DataRevisionId) -> DataRevisionDetails | None:
+        """Return cached revision details, or None, without loading."""
+        return self._revisions.get(revision_id)
+
+    def peek_latest_revision(self, version_id: DataVersionId) -> DataRevisionId | None:
+        """Return cached latest for a version, or None, without walking history."""
+        return self._latest_revisions.get(version_id)
+
     def latest(self, data_id: DataId) -> DataRevisionId:
         if data_id not in self._latest:
             self._latest[data_id] = self.load_latest(data_id)

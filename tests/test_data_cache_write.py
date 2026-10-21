@@ -11,6 +11,19 @@ from test_data_cache import MemoryDataCache
 
 
 class DataCacheWriteTests(unittest.TestCase):
+    def test_peeks_observe_written_empty_tables_and_metadata_without_loading(self):
+        cache = MemoryDataCache()
+        written, update = cache.write(table({"price": []}), id="prices",
+                                      as_of=datetime(1970, 1, 1, tzinfo=UTC))
+        cache.loads.clear()
+        self.assertIs(cache.peek_version(("prices", 0)), written)
+        self.assertEqual(cache.peek_latest("prices"), ("prices", 0, 0))
+        self.assertEqual(cache.peek_latest_revision(("prices", 0)), ("prices", 0, 0))
+        self.assertEqual(cache.peek_revision(("prices", 0, 0)), DataRevisionDetails((), (), None))
+        self.assertIsNone(cache.peek_version(("other", 0)))
+        self.assertIsNone(cache.peek_version(("prices", 1)))
+        self.assertEqual(cache.loads, [])
+
     def test_first_write_persists_in_order_and_populates_read_caches(self):
         cache = MemoryDataCache()
         original = table({"price": [10, None, 30]}, metadata={b"custom": b"\xff\x00"})

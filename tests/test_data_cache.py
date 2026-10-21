@@ -68,6 +68,52 @@ class DataCacheTests(unittest.TestCase):
             [("latest", "prices"), ("data", ("prices", 1)), ("revision", ("prices", 1, 1))],
         )
 
+    def test_peeks_do_not_load_stored_resources_or_cache_misses(self):
+        # Records exist in storage, but peeking must not fetch them. A later
+        # ordinary read must still load them and make them visible to peeks.
+        resources = (
+            (self.cache.peek_latest, self.cache.latest, "prices"),
+            (self.cache.peek_version, self.cache.get_data, ("prices", 1)),
+            (self.cache.peek_revision, self.cache.get_revision, ("prices", 1, 1)),
+            (self.cache.peek_latest_revision, self.cache.get_latest_revision, ("prices", 1)),
+        )
+        for peek, _, key in resources:
+            self.assertIsNone(peek(key))
+            self.assertIsNone(peek(key))
+        self.assertEqual(self.cache.loads, [])
+        for peek, read, key in resources:
+            value = read(key)
+            self.cache.loads.clear()
+            self.assertIs(peek(key), value)
+            self.assertEqual(self.cache.loads, [])
+        self.assertEqual(self.cache.writes, [])
+
+    def test_peeking_version_latest_does_not_resolve_cached_history(self):
+        self.cache.latest_values["prices"] = ("prices", 3, 8)
+        self.cache.revision_values[("prices", 3, 0)] = DataRevisionDetails(None, None, (1, 4))
+        self.cache.latest("prices")
+        self.cache.get_revision(("prices", 3, 0))
+        self.cache.loads.clear()
+        # Even enough metadata to answer is not a cached version lookup result.
+        self.assertIsNone(self.cache.peek_latest_revision(("prices", 3)))
+        self.assertIsNone(self.cache.peek_latest_revision(("prices", 1)))
+        self.assertEqual(self.cache.loads, [])
+        self.assertEqual(self.cache.get_latest_revision(("prices", 1)), ("prices", 1, 4))
+        self.assertEqual(self.cache.peek_latest_revision(("prices", 1)), ("prices", 1, 4))
+
+    def test_peeks_observe_updates_without_loading_payloads(self):
+        update = DataUpdateDetails(id="prices", revision=(2, 3), previous_revision=None,
+                                   dependencies=(), weak_dependencies=())
+        self.cache.apply_update(update)
+        self.assertEqual(self.cache.peek_latest("prices"), ("prices", 2, 3))
+        self.assertEqual(self.cache.peek_latest_revision(("prices", 2)), ("prices", 2, 3))
+        self.assertEqual(self.cache.peek_revision(("prices", 2, 3)), DataRevisionDetails((), (), None))
+        self.assertIsNone(self.cache.peek_version(("prices", 2)))
+        self.assertIsNone(self.cache.peek_revision(("prices", 2, 2)))
+        self.assertIsNone(self.cache.peek_latest_revision(("prices", 1)))
+        self.assertIsNone(self.cache.peek_latest("other"))
+        self.assertEqual(self.cache.loads, [])
+
     def test_update_replaces_latest_and_retains_old_resources(self):
         old_latest = self.cache.latest("prices")
         old_data = self.cache.get_data(("prices", 1))

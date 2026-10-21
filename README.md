@@ -104,6 +104,12 @@ starts there and follows the `(version, revision_count)` pair in
 data ID. That pair identifies the previous version and its maximum revision;
 `None` marks the end of the chain.
 
+`peek_latest(data_id)`, `peek_version(version_id)`, `peek_revision(revision_id)`,
+and `peek_latest_revision(version_id)` return the corresponding cached value or
+`None`. They do not load from storage or walk history; `peek_version` returns the
+cached Arrow table, including an empty table. The latest-revision peek reads only
+the version-specific lookup cache, even if other cached metadata could resolve it.
+
 `cache.write(data, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
 accepts an Arrow table and returns `(written_table, DataUpdateDetails)`. Explicit
 `id` and `as_of` override schema metadata. An ID must be supplied in one of those
