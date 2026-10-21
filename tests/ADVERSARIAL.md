@@ -15,9 +15,10 @@ python -I tests/run_adversarial.py
 python -I tests/run_adversarial.py --strict
 ```
 
-All review reproductions are ordinary passing regressions. There are no remaining
-`expectedFailure` tests. The strict command remains available to expose any future
-explicitly expected failures without their wrappers.
+The original four review reproductions are ordinary passing regressions. The
+[second conflict-tracker review](CONFLICT_TRACKER_REVIEW.md) adds five explicitly
+expected failures (including one conditional shared-cache case). The strict
+command exposes them without their wrappers; the normal suite is not defect-free.
 
 ## Passing scenario matrix
 
