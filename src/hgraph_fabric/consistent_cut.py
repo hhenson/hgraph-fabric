@@ -1,4 +1,5 @@
 from collections.abc import Iterator
+from enum import Enum, auto
 
 from .data_cache import DataCache
 from .data_graph import DataEdgeGraph
@@ -8,6 +9,12 @@ from .data_subscription_graph import DataSubscriptionGraph
 
 class NoConsistentCutError(LookupError):
     """Available histories contain no compatible pair within the given bounds."""
+
+
+class _Comparison(Enum):
+    CONFLICT = auto()
+    EXACT = auto()
+    OMISSION = auto()
 
 
 def find_consistent_cut(
@@ -94,9 +101,9 @@ def find_consistent_cut(
             adjusted = cache.get_latest_revision((contained[0], target))
             return (adjusted, right_revision) if contained_is_left else (left_revision, adjusted)
         # An earlier tournament comparison may have downgraded this root.
-        # Hold it fixed and search only for its version in the consuming tree.
+        # Hold it fixed and search for its version or a consistent omission.
+        # Retain its full tree: historical candidates may no longer contain it.
         common = {contained[0]}
-        fixed_nodes = {contained[0]: contained[1]}
         leading_is_left = not contained_is_left
         leading = left if leading_is_left else right
         start = other
@@ -117,14 +124,15 @@ def find_consistent_cut(
         #    subscription's bounded history.
         if left_nodes[mismatch] > right_nodes[mismatch]:
             leading, start = left, left_revision
-            fixed_nodes = right_nodes
             leading_is_left = True
         else:
             leading, start = right, right_revision
-            fixed_nodes = left_nodes
             leading_is_left = False
     leading_floor = lower_bounds[0 if leading_is_left else 1]
     fixed_floor = lower_bounds[1 if leading_is_left else 0]
+    fixed = right if leading_is_left else left
+    fixed_revision = right_revision if leading_is_left else left_revision
+    fixed_nodes = _nodes(right_graph if leading_is_left else left_graph, fixed_revision)
 
     def result(revision: DataRevisionId) -> tuple[DataRevisionId, DataRevisionId]:
         return (revision, right_revision) if leading_is_left else (left_revision, revision)
@@ -140,9 +148,10 @@ def find_consistent_cut(
     absent = None
     for revision in _revisions_backwards(start, cache, leading_floor):
         nodes = _nodes(leading.revision(revision, cache), revision)
-        if _first_mismatch(nodes, fixed_nodes) is not None:
-            continue  # Absence of one dependency cannot excuse another conflict.
-        if common <= nodes.keys():
+        comparison = _compare_candidates(revision, nodes, fixed_revision, fixed_nodes, common)
+        if comparison is _Comparison.CONFLICT:
+            continue
+        if comparison is _Comparison.EXACT:
             return result(revision)
         if absent is None:
             absent = revision  # Remember the newest consistent omission only.
@@ -155,8 +164,6 @@ def find_consistent_cut(
     # revision that matches the other side's complete fixed dependency vector.
     # Only after the normal search fails do we allow both sides to move. Retain
     # argument order and the original proposed upper bounds throughout.
-    fixed = right if leading_is_left else left
-    fixed_revision = right_revision if leading_is_left else left_revision
     joint = _search_both_histories(
         leading, fixed, start, fixed_revision, common, cache, leading_floor, fixed_floor
     )
@@ -185,24 +192,45 @@ def _search_both_histories(
         fixed_nodes = _nodes(fixed.revision(fixed_revision, cache), fixed_revision)
         for leading_revision in _revisions_backwards(leading_start, cache, leading_floor):
             leading_nodes = _nodes(leading.revision(leading_revision, cache), leading_revision)
-            # Historical membership can differ from the initial pair. Apply
-            # the same root-containment rule to each candidate pair afresh.
-            if leading.data_id in fixed_nodes:
-                matches = leading_revision[1] == fixed_nodes[leading.data_id]
-            elif fixed.data_id in leading_nodes:
-                matches = fixed_revision[1] == leading_nodes[fixed.data_id]
-            else:
-                matches = _first_mismatch(leading_nodes, fixed_nodes) is None
-            if not matches:
+            comparison = _compare_candidates(
+                leading_revision, leading_nodes, fixed_revision, fixed_nodes, common
+            )
+            if comparison is _Comparison.CONFLICT:
                 continue
             pair = leading_revision, fixed_revision
-            if common <= leading_nodes.keys() and common <= fixed_nodes.keys():
+            if comparison is _Comparison.EXACT:
                 return pair
             if absent is None:
                 absent = pair
     if absent is not None:
         return absent
     raise NoConsistentCutError("No compatible pair exists within the proposed histories")
+
+
+def _compare_candidates(
+    left_revision: DataRevisionId,
+    left_nodes: dict[DataId, DataVersion],
+    right_revision: DataRevisionId,
+    right_nodes: dict[DataId, DataVersion],
+    common: set[DataId],
+) -> _Comparison:
+    # Containment belongs to this candidate pair, not the original proposals.
+    # A matching root is exact even if its latest dependency revision has
+    # changed or removed descendants from the original common-node set.
+    if left_revision[0] in right_nodes:
+        matches = left_revision[1] == right_nodes[left_revision[0]]
+        return _Comparison.EXACT if matches else _Comparison.CONFLICT
+    if right_revision[0] in left_nodes:
+        matches = right_revision[1] == left_nodes[right_revision[0]]
+        return _Comparison.EXACT if matches else _Comparison.CONFLICT
+
+    # Without containment every shared node must agree, including newly shared
+    # nodes. Losing an original dependency cannot excuse a different conflict.
+    if _first_mismatch(left_nodes, right_nodes) is not None:
+        return _Comparison.CONFLICT
+    if common <= left_nodes.keys() and common <= right_nodes.keys():
+        return _Comparison.EXACT
+    return _Comparison.OMISSION
 
 
 def _revisions_backwards(

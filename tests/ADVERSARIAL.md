@@ -27,10 +27,10 @@ search visits revisions newest first, returns an exact match immediately, and
 retains the newest consistent omission only after ruling out every exact match.
 The two reproductions pass, along with 2,916 additional refreshed-history cases.
 The [containment transition review](CONTAINMENT_TRANSITION_REVIEW.md) adds changing
-topologies and candidate-specific containment cases. It exposes inconsistent
-omission acceptance and missed historical containment matches. The full suite
-now has 159 tests: 154 pass and five are expected-failure reproductions. Strict
-mode exposes those five failures; they remain unresolved in production.
+topologies and candidate-specific containment cases. Its inconsistent omission
+acceptance and missed historical containment matches are now addressed by a
+shared candidate comparison in both search paths. The full suite has 161 passing
+tests with no expected failures; the strict adversarial runner has 54 passing tests.
 
 ## Passing scenario matrix
 

@@ -1,8 +1,7 @@
 """Changing containment must change which nodes constrain a candidate cut.
 
-Known gaps are expected failures so ordinary CI can retain the reproductions.
-Run run_adversarial.py --strict to expose them as failures. Matrix tests collect
-all mismatches before asserting, so an early failure does not truncate coverage.
+Matrix tests collect all mismatches before asserting, so an early failure does
+not truncate coverage. The original review reproductions are passing regressions.
 """
 from itertools import combinations, permutations, product
 import unittest
@@ -60,7 +59,6 @@ def monotonic_histories():
 
 
 class ContainmentTransitionTests(unittest.TestCase):
-    @unittest.expectedFailure
     def test_omitting_contained_root_still_checks_shared_descendants(self):
         history = containment_history(("x1", "x2", "a3"))
         result = pair(history, ("b", 100, 0))
@@ -68,7 +66,6 @@ class ContainmentTransitionTests(unittest.TestCase):
         self.assertTrue(history.consistent(expected))
         self.assertEqual(result, expected)  # B's newer omission still conflicts on X.
 
-    @unittest.expectedFailure
     def test_floor_excluding_only_compatible_omission_rejects_pair(self):
         history = containment_history(("x1", "x2", "a3"))
         floor = history.revisions("b")[1]
@@ -104,11 +101,9 @@ class ContainmentTransitionTests(unittest.TestCase):
     def test_exact_containment_catalog_across_counts_sparse_versions_floors_and_orders(self):
         self.check_catalog(require_exact=True)
 
-    @unittest.expectedFailure
     def test_omission_catalog_rechecks_all_shared_nodes_after_containment_disappears(self):
         self.check_catalog(require_exact=False)
 
-    @unittest.expectedFailure
     def test_manager_never_commits_conflicting_omission_in_any_entry_path(self):
         failures = []
         for order, entry in product(permutations(("a", "b", "c")),
@@ -158,12 +153,57 @@ class ContainmentTransitionTests(unittest.TestCase):
                 failures.append((counts, reverse, actual, expected))
         self.assertEqual(len(failures), 0, f"{len(failures)}/4 mismatches; first: {failures[:1]}")
 
-    @unittest.expectedFailure
     def test_historical_containment_match_takes_precedence_over_older_omission(self):
         self.check_gaining_containment(exclude_omission=False)
 
-    def test_joint_fallback_recognizes_historical_containment_when_omission_is_excluded(self):
+    def test_historical_containment_respects_floor_excluding_omission(self):
         self.check_gaining_containment(exclude_omission=True)
+
+    def test_new_containment_is_exact_even_when_original_shared_descendant_disappears(self):
+        for counts, reverse in product((False, True), repeat=2):
+            with self.subTest(counts=counts, reverse=reverse):
+                history = History()
+                history.add("x", 1)
+                history.add("x", 3)
+                history.add("a", 100, dependencies=(("x", 1),))
+                history.add("a", 100, 1)  # A's latest count drops X.
+                for index, deps in enumerate(((("x", 1),), (("a", 100),), (("x", 3),))):
+                    version, count = (9000, index) if counts else ((100, 200, 9000)[index], 0)
+                    history.add("b", version, count, deps)
+                revisions = history.revisions("b")
+                expected = {"a": ("a", 100, 0), "b": revisions[1]}
+                self.assertTrue(history.consistent(expected))
+                self.assertNotIn("x", history.nodes(revisions[1]))
+                # B's contained A matches immediately. The older B -> X1 must
+                # not outrank it merely because that candidate still has X.
+                self.assertEqual(pair(history, revisions[0], reverse), expected)
+
+    def test_joint_search_treats_containment_with_removed_descendant_as_exact(self):
+        for reverse in (False, True):
+            with self.subTest(reverse=reverse):
+                history = History()
+                for source in ("x", "y"):
+                    for version in (1, 2):
+                        history.add(source, version)
+                history.add("a", 100, dependencies=(("x", 1), ("y", 1)))
+                history.add("a", 100, 1, dependencies=(("y", 1),))
+                history.add("a", 9000, dependencies=(("x", 1), ("y", 2)))
+                history.add("b", 100, dependencies=(("x", 1), ("y", 1)))
+                history.add("b", 200, dependencies=(("a", 100),))
+                history.add("b", 9000, dependencies=(("x", 2), ("y", 1)))
+                cache = HistoryCache(history)
+                manager = DataSubscriptionManager(cache)
+                manager.add_subscriptions(("a", "b"))
+                a, b = manager._subscriptions.values()
+                for sub in (a, b):
+                    sub.proposed_revision = sub.latest_revision
+                # No B candidate can match A@9000: joint fallback must move A.
+                self.assertFalse(any(history.consistent({"a": a.latest_revision, "b": r})
+                                     for r in history.revisions("b")))
+                expected = (("a", 100, 1), ("b", 200, 0))
+                self.assertTrue(history.consistent(dict(zip(("a", "b"), expected))))
+                args = (b, a) if reverse else (a, b)
+                self.assertEqual(find_consistent_cut(*args, cache), expected[::-1] if reverse else expected)
 
 
 def changing_dag(old_mask, new_mask=None):

@@ -1,9 +1,10 @@
 # Containment transitions: adversarial review
 
-Reviewed production tree: `b91f385` (PR #19, including the newest-first bounded
-history search). This review adds tests and documentation; production is unchanged.
+Originally reviewed production tree: `b91f385` (PR #19, including the newest-first
+bounded history search). The finding is now addressed; all five reproductions
+are ordinary passing regressions. The examples below describe the original defect.
 
-## P1: historical candidates retain the initial containment constraints
+## P1: historical candidates retain the initial containment constraints (addressed)
 
 `consistent_cut.py:96-102` reduces the fixed comparison to a contained root when
 that root's proposal is behind the consuming tree. The one-sided history loop
@@ -68,14 +69,18 @@ within-version-count encoding reproduce it. Excluding the omission via a lower
 bound reaches joint fallback, which already re-evaluates containment and returns
 the correct newest candidate. That adjacent case is a passing regression.
 
-### Proposed correction
+### Implemented correction
 
-Evaluate compatibility from each candidate pair's current topology, using the
-same containment rules as joint fallback. Keep the full fixed tree available:
-if containment disappears, compare all shared nodes; if containment appears,
-apply the root-version shortcut. Preserve newest-first traversal, current floors,
-immediate exact-match resolution and deferred newest **consistent** omission.
-The failing tests should become ordinary passing regressions with that correction.
+Both search paths now use `_compare_candidates` to classify the candidate pair
+as a conflict, exact match, or compatible omission. The normal search retains the
+full fixed tree: if containment disappears, it compares all shared nodes; if
+containment appears, it applies the root-version shortcut. A matching contained
+root is exact even when an originally shared descendant has disappeared.
+
+Newest-first traversal, current floors, immediate exact-match resolution and
+deferred newest **consistent** omission are preserved. No manager-wide validation
+pass is added. The five reproductions pass, and two additional tests cover a
+removed descendant in normal and joint search.
 
 ## Added coverage
 
@@ -89,10 +94,11 @@ of the matrix from running.
 | --- | ---: | --- |
 | All transitions between three-node forward DAGs | 3,072 initial cuts | Pass: 8 old topologies, 8 new, 8 root-head vectors, 6 registration orders |
 | Changing-topology publication streams | 1,176 streams / 3,528 updates | Pass: all nonempty root subsets and all dependency-before-consumer publication orders; safe cuts, forward currents, exact advancement sets and final convergence |
-| Containment membership catalog | 1,856 bounded pair comparisons | 116 monotonic four-record histories, sparse versions or counts, four floors, both argument orders; 308 exact cases pass, 504 of 1,548 omission/no-solution cases fail |
-| Minimal lost-containment pair and excluded witness | 2 | Both expose the safety defect |
-| Manager entry paths and registration orders | 16 | 4 inconsistent commits, as described above |
-| Gaining historical containment | 8 | 4 incorrectly choose an older omission; 4 correctly resolve via joint fallback when the omission is excluded |
+| Containment membership catalog | 1,856 bounded pair comparisons | All pass: 116 monotonic four-record histories, sparse versions or counts, four floors, both argument orders; formerly 504 omission/no-solution failures |
+| Minimal lost-containment pair and excluded witness | 2 | Both pass: reject the conflicting omission and respect the floor |
+| Manager entry paths and registration orders | 16 | All pass; formerly 4 inconsistent commits |
+| Gaining historical containment | 8 | All pass, including floors excluding the omission |
+| New containment removes an original shared descendant | 6 | Pass: four normal-search cases across sparse versions/counts and argument orders, plus two joint-search cases |
 
 The catalog allows absence, direct X@1/2/3, and containment of A@100 or A@9000.
 Present expanded X versions and consumed A versions are nondecreasing, while
@@ -108,11 +114,8 @@ block/release cycles. No additional failure was observed in those tests.
 ## Validation and limits
 
 - Built the wheel and source distribution and tested the installed wheel locally
-  on Python 3.12 and 3.14: **159 tests; 154 pass, 5 expected failures**.
-- Strict adversarial run: **52 tests; 47 pass, 5 assertion failures** matching the
-  reproductions above, with no unexpected errors.
-- Expected-failure markers keep the review pack mergeable without silently
-  treating a fix as complete. An unexpected success fails the normal suite.
+  on Python 3.12 and 3.14: **161 passing tests, no expected failures**.
+- Strict adversarial run: **54 passing tests**.
 
 ```sh
 python -I -m unittest discover -s tests
