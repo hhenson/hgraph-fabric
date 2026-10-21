@@ -31,6 +31,10 @@ consistent are proposals copied to current. Before committing, every proposed
 full tree is loaded, including a single subscription with no pair comparisons.
 Failed searches or tree loads leave current intact.
 
+Cache writes and notifications to every associated subscription manager are
+coordinated. Deliver an update to all associated managers before starting another
+cut operation or reading trees between those notifications.
+
 `apply_update(update)` always updates the cache. An update for a subscribed
 data ID changes that subscription's latest revision and attempts advancement.
 For dependency updates, the manager indexes current and latest trees by exact
@@ -44,7 +48,10 @@ has a recorded conflict, at least two subscriptions depend on it, and an affecte
 subscription is behind latest. Unrelated branches, other data versions and
 duplicate notifications do not trigger searches. A still-blocked root does not
 prevent another affected root from driving a retry. One complete proposed cut is
-committed per notification; tracker entries are removed as roots reach latest.
+committed per notification. `cleanup_conflicts()` retires caught-up roots and
+versions absent from all current/latest trees. It runs automatically after each
+completed update (including a blocked update) and initial cut, and can also be
+called explicitly. Live conflicts remain tracked while roots are waiting.
 
 Tree refresh and cut advancement are separate. When the gate skips a search,
 root selections stay unchanged; refreshed current trees are marked for comparison

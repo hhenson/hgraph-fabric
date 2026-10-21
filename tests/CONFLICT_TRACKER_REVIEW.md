@@ -1,9 +1,9 @@
 # Conflict tracker and dependency-update review
 
-Reviewed implementation: `87a9f56` (PR #13). This review adds tests and findings;
-it does not change production behavior. Three gaps reproduce with a single
-manager. A fourth finding is conditional on writes to a shared cache outside
-the owning manager.
+Reviewed implementation: `87a9f56` (PR #13). Findings 1 and 2 remain open.
+Finding 3 is addressed by explicit conflict cleanup at completed-operation
+boundaries. Finding 4 is withdrawn under the clarified contract: cache writes
+and notifications to all associated managers are coordinated.
 
 ## Results and scope
 
@@ -13,17 +13,17 @@ root versions or revision counts, and dependency advancement or omission. It
 checks the returned versions, committed cuts against the raw-record oracle,
 reverse-index contents, tracker cleanup and duplicate suppression.
 
-Five expected-failure tests cover the three single-manager findings (two retry
-variants) and the conditional shared-cache finding. They assert the desired
-behavior, not the current defect. Run after installing the project:
+Three expected-failure tests cover the missed wakeup and two retry variants.
+Cleanup and coordinated shared-cache delivery are ordinary passing regressions.
+The expected failures assert the desired behavior, not the current defect. Run after installing the project:
 
 ```sh
 python -I -m unittest discover -s tests
 python -I tests/run_adversarial.py --strict
 ```
 
-The normal suite reports 137 tests: 132 pass, five explicitly expected failures.
-The strict adversarial runner reports those five as failures. A green normal
+The normal suite reports 139 tests: 136 pass, three explicitly expected failures.
+The strict adversarial runner reports those three as failures. A green normal
 run therefore does not mean these findings are fixed.
 
 The exploratory generator checked 31,269 deterministic seeds, retaining 9,259
@@ -44,8 +44,8 @@ Use `middle@100 -> y@1` and these root histories (all revision counts zero):
 | Root | Version 100 | Version 200 | Version 300 |
 | --- | --- | --- | --- |
 | a | y@1 | y@2 (latest) | — |
-| b | middle@100, x@2 (latest) | — | — |
-| c | middle@100 | x@2 | y@3 (latest) |
+| b | middle@100 (latest) | — | — |
+| c | middle@100 | no dependencies | y@3 (latest) |
 
 Register `a, b, c`. Comparing a with b downgrades a and records
 `middle@100 -> {a, b}`. Comparing c with the downgraded a then downgrades c.
@@ -90,7 +90,7 @@ and event completion need separate state; a read must not consume a retry.
 Regressions: `test_duplicate_retries_resolution_that_failed_after_refresh_completed`
 and `test_reading_repaired_trees_does_not_consume_a_pending_retry`.
 
-## 3. P3: Conflict entries retain versions no selected tree references
+## 3. P3: Conflict entries retain versions no selected tree references (addressed)
 
 Locations: `data_subscription_manager.py:105-109` removes unused reverse-index
 entries without retiring their conflict markers; `:166-170` trims only roots
@@ -107,35 +107,28 @@ has no dependents for them. The retained state grows with rejected publications
 until the roots eventually catch up, even though the active dependency set is
 constant. This is a storage/maintenance gap, not an inconsistent-cut claim.
 
-Proposed direction: retire unreachable version entries and reconcile conflict
-markers with the active current/latest dependency index as it changes.
+`cleanup_conflicts()` now retires unreachable version entries and roots that
+have caught up. It runs after completed updates (including those that remain
+blocked) and initial cuts, and is also callable explicitly. It preserves active
+current-only and latest-only dependencies and markers whose waiting root is
+blocked by a peer's dependency. Cleanup does not run midway through searches or
+after an operation raises, so it does not consume pending failure recovery.
 
 Regression: `test_retired_versions_are_removed_while_the_roots_are_still_waiting`.
 
-## 4. Conditional P1: Shared-cache writes can bypass dirty-tree validation
+## 4. Shared-cache notification finding (withdrawn: coordinated contract)
 
-Locations: `data_subscription_graph.py:79-84` refreshes on lazy access;
-`data_subscription_manager.py:240-243` assumes unchanged, non-dirty peers still
-agree. Dirty flags are set only by that manager's own update handler.
+The reproduction omitted delivery to one associated manager, then performed an
+unrelated cut operation in that manager. The clarified contract excludes that
+sequence: cache writes and delivery to every associated manager are coordinated.
 
-Manager M has current `a -> middle@100 -> x@1`, `b -> x@1`, and an independent
-leaf. Another manager sharing its DataCache applies `middle@100` count 1, now
-consuming x@2. M next receives an update for the independent leaf. Pair
-comparisons lazily refresh a's tree, but M never marks a dirty. Both a and b
-remain in the assumed stable set. M commits the independent advancement even
-though a now consumes x@2 and b consumes x@1.
+The replacement regression applies each update to the shared cache and both
+associated managers before proceeding. Both managers mark refreshed current
+trees dirty, reject the unrelated advancement while trees disagree, and advance
+when the matching peer update arrives. No additional notification mechanism is
+introduced; coordination belongs to the existing update-delivery owner.
 
-This requires cache mutation outside M's update handler. It does not reproduce
-when every relevant update is routed through M before it performs another
-resolution. The graph accessor explicitly supports freshness after external
-cache updates, but the manager currently lacks the matching invalidation signal.
-
-Proposed direction: either notify every owning manager of cache changes, detect
-changed tree generations before trusting the stable set, or explicitly restrict
-the cache ownership/update-routing contract. Do not call shared-cache operation
-safe without one of those rules.
-
-Regression: `test_shared_cache_refresh_cannot_certify_an_inconsistent_cut`.
+Regression: `test_coordinated_shared_cache_updates_revalidate_each_manager`.
 
 ## Agreed policy boundaries, not additional implementation findings
 
