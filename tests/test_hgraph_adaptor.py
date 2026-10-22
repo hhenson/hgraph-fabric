@@ -533,6 +533,82 @@ class HgraphAdaptorTests(unittest.TestCase):
         self.assertEqual(self.transport.sent[0].dependencies, ())
         self.assertEqual(self.transport.sent[0].weak_dependencies, ())
 
+    def test_automatic_dependencies_include_direct_version_subscriptions(self):
+        seed(self.cache, "ancestor", version=99)
+        seed(self.cache, "source", version=101, dependencies=(("ancestor", 99),))
+        seed(self.cache, "unused", version=202)
+
+        @hg.compute_node
+        def stamp(version: hg.TS[VersionId]) -> hg.TS[hg.Frame[Prices]]:
+            return pa.table({"price": [version.value[1]]})
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            version_id("unused")
+            publish(stamp(version_id("source")), "output")
+
+        self.run_graph(app)
+        self.assertEqual(len(self.transport.sent), 1)
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 101),))
+        self.assertEqual(self.transport.sent[0].weak_dependencies, ())
+        self.assertEqual(self.cache.get_version(self.cache.latest("output")[:2]).to_pydict(), {"price": [101]})
+
+    def test_direct_version_subscription_is_weak_on_a_passive_path(self):
+        seed(self.cache, "source", version=101)
+        seed(self.cache, "trigger", version=100)
+        observed = {}
+
+        @hg.compute_node(active=("trigger",))
+        def stamp(trigger: hg.TS[hg.Frame[Prices]], version: hg.TS[VersionId]) -> hg.TS[hg.Frame[Prices]]:
+            return pa.table({"price": [version.value[1]]})
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(stamp(subscribe[Prices]("trigger"), version_id("source")), "output")
+
+        def update_source(transport):
+            if transport.sent and not observed:
+                _, update = seed(self.cache, "source", version=202)
+                transport.pending.append(update)
+                observed["updated"] = True
+
+        self.transport.on_poll = update_source
+        self.run_graph(app)
+        self.assertTrue(observed)
+        self.assertEqual(len(self.transport.sent), 1)
+        self.assertEqual(self.transport.sent[0].dependencies, (("trigger", 100),))
+        self.assertEqual(self.transport.sent[0].weak_dependencies, (("source", 101),))
+
+    def test_active_version_subscription_wins_over_passive_frame_subscription(self):
+        seed(self.cache, "source", version=101)
+
+        @hg.compute_node(active=("version",))
+        def stamp(version: hg.TS[VersionId], df: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
+            return df.value
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(stamp(version_id("source"), subscribe[Prices]("source")), "output")
+
+        self.run_graph(app)
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 101),))
+        self.assertEqual(self.transport.sent[0].weak_dependencies, ())
+
+    def test_direct_version_inference_rejects_another_service_path(self):
+        @hg.compute_node
+        def stamp(version: hg.TS[VersionId]) -> hg.TS[hg.Frame[Prices]]:
+            return pa.table({"price": [version.value[1]]})
+
+        @hg.graph
+        def app():
+            publish(stamp(version_id("source", path="other")), "output")
+
+        with self.assertRaisesRegex(Exception, "across service paths; provide explicit dependencies"):
+            self.run_graph(app)
+
     def test_strong_self_dependency_is_rejected_before_persistence(self):
         seed(self.cache, "source", version=101)
         before = list(self.cache.writes)

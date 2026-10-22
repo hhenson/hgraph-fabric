@@ -411,7 +411,8 @@ shutdown; it does not schedule polling on the graph thread. Transport polling
 must honor that timeout, and storage operations must complete for shutdown to
 finish. The worker drains accepted requests before stopping.
 
-Omit `dependencies` to infer them from fabric subscriptions upstream of `df`.
+Omit `dependencies` to infer them from fabric subscriptions upstream of `df`,
+including direct `version_id(...)` subscriptions used to compute the frame.
 Discovery stops at each subscription; it does not flatten that dataset's stored
 dependency tree. A path containing a declared passive input (including
 `@compute_node(active=...)` or `passive(...)`) produces a weak dependency.

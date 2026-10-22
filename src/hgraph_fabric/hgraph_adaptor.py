@@ -31,9 +31,7 @@ def _subscribe(id: TS[str], path: str = "fabric") -> TS[Frame]: ...
 
 
 @subscription_service
-def version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]:
-    """Subscribe to the version selected by the shared consistent cut."""
-    ...
+def _version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]: ...
 
 
 @request_reply_service
@@ -50,6 +48,14 @@ def subscribe(id: TS[str], schema: type[COMPOUND_SCALAR] = AUTO_RESOLVE,
     frame = _typed_frame[COMPOUND_SCALAR: schema](_subscribe(id, path=path))
     wiring_extension_state("hgraph_fabric.subscriptions", list).append((frame, id, path))
     return frame
+
+
+@graph
+def version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]:
+    """Subscribe to the version selected by the shared consistent cut."""
+    version = _version_id(id, path=path)
+    wiring_extension_state("hgraph_fabric.subscriptions", list).append((version, id, path))
+    return version
 
 
 @compute_node
@@ -100,7 +106,7 @@ def publish(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
             if source_path != path:
                 raise ValueError("Cannot infer fabric dependencies across service paths; "
                                  "provide explicit dependencies and weak_dependencies")
-            (weak if is_passive else strong).append(version_id(source_id, path=source_path))
+            (weak if is_passive else strong).append(_version_id(source_id, path=source_path))
         dependencies = _unique_dependencies(inputs(strong))
         weak_dependencies = _automatic_weak_dependencies(
             df, id, dependencies, inputs(weak), inputs(weak_dependencies))
@@ -258,7 +264,7 @@ def _requests(data_ids: TSS[str], version_ids: TSS[str],
     worker.commands.put((keys, tuple(requests), retired))
 
 
-@service_impl(interfaces=(_subscribe, version_id, _publish))
+@service_impl(interfaces=(_subscribe, _version_id, _publish))
 def fabric_service(path: str, cache: DataCache, transport: DataFabricTransport,
                    poll_interval: float = 0.05):
     """Register with register_service(path, fabric_service, cache=..., transport=...).
@@ -271,8 +277,8 @@ def fabric_service(path: str, cache: DataCache, transport: DataFabricTransport,
         raise ValueError("Poll interval must be finite and positive")
     worker = _Worker(cache, transport, poll_interval)
     output = _responses(_session_events(worker))
-    _requests(impl_input(_subscribe, path), impl_input(version_id, path),
+    _requests(impl_input(_subscribe, path), impl_input(_version_id, path),
               impl_input(_publish, path), worker)
     impl_output(_subscribe, output.data, path)
-    impl_output(version_id, output.versions, path)
+    impl_output(_version_id, output.versions, path)
     impl_output(_publish, output.replies, path)
