@@ -37,7 +37,19 @@ def version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]:
 
 
 @request_reply_service
-def _publish(request: TS[object], path: str = "fabric") -> TS[VersionId]: ...
+def _publish(df: TS[Frame], id: TS[str],
+             dependencies: TS[tuple[VersionId, ...]],
+             weak_dependencies: TS[tuple[VersionId, ...]],
+             as_of: TS[datetime], new_version: TS[bool], path: str = "fabric") -> TS[VersionId]: ...
+
+
+class _PublicationInputs(TimeSeriesSchema):
+    df: TS[Frame]
+    id: TS[str]
+    dependencies: TS[tuple[VersionId, ...]]
+    weak_dependencies: TS[tuple[VersionId, ...]]
+    as_of: TS[datetime]
+    new_version: TS[bool]
 
 
 @graph
@@ -78,14 +90,16 @@ def publish(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
             return (TSL.from_ts(*value, tp=TS[VersionId]) if value
                     else const((), tp=TSL[TS[VersionId], Size[0]]))
         return value
-    return _publish(_publication(df, id, inputs(dependencies), inputs(weak_dependencies)), path=path)
+    request = _publication(df, id, inputs(dependencies), inputs(weak_dependencies))
+    return _publish(request.df, request.id, request.dependencies,
+                    request.weak_dependencies, request.as_of, request.new_version, path=path)
 
 
 @compute_node(valid=("df", "id"))
 def _publication(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
                  dependencies: TSL[TS[VersionId], SIZE],
                  weak_dependencies: TSL[TS[VersionId], WEAK_SIZE],
-                 _state: STATE = None, _api: EvaluationEngineApi = None) -> TS[object]:
+                 _state: STATE = None, _api: EvaluationEngineApi = None) -> TSB[_PublicationInputs]:
     if ((len(dependencies) and not dependencies.all_valid)
             or (len(weak_dependencies) and not weak_dependencies.all_valid)):
         return
@@ -93,11 +107,13 @@ def _publication(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
     # arrive in a later cycle. Each client tracks its own publication inputs.
     new_table = (getattr(_state, "data_time", None) != df.last_modified_time
                  or getattr(_state, "id", None) != id.value)
-    request = _Publication(
-        as_arrow_table(df.value) if new_table else None, id.value,
-        tuple(dependencies.value) if len(dependencies) else (),
-        tuple(weak_dependencies.value) if len(weak_dependencies) else (),
-        _api.evaluation_clock.evaluation_time.replace(tzinfo=UTC))
+    request = dict(
+        id=id.value, new_version=new_table,
+        dependencies=tuple(dependencies.value) if len(dependencies) else (),
+        weak_dependencies=tuple(weak_dependencies.value) if len(weak_dependencies) else (),
+        as_of=_api.evaluation_clock.evaluation_time.replace(tzinfo=UTC))
+    if new_table:
+        request["df"] = as_arrow_table(df.value)
     _state.id, _state.data_time = id.value, df.last_modified_time
     return request
 
@@ -194,11 +210,16 @@ def _responses(event: TS[object]) -> TSB[_FabricIO]:
 
 @sink_node(valid=())
 def _requests(data_ids: TSS[str], version_ids: TSS[str],
-              publications: TSD[int, TS[object]], worker: _Worker):
+              publications: TSD[int, TSB[_PublicationInputs]], worker: _Worker):
     keys = frozenset(data_ids.value if data_ids.valid else ()) | frozenset(
         version_ids.value if version_ids.valid else ())
-    requests = tuple((key, value.value) for key, value in publications.modified_items()
-                     if value.valid) if publications.valid else ()
+    # Service transport snapshots can re-tick retained fields. Carry the
+    # publication intent explicitly instead of treating df.modified as new data.
+    requests = tuple((key, _Publication(
+        as_arrow_table(value.df.value) if value.new_version.value else None,
+        value.id.value, tuple(value.dependencies.value), tuple(value.weak_dependencies.value),
+        value.as_of.value.replace(tzinfo=UTC))) for key, value in publications.modified_items()
+        if value.all_valid) if publications.valid else ()
     retired = tuple(publications.removed_keys()) if publications.valid else ()
     worker.commands.put((keys, requests, retired))
 

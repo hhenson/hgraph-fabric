@@ -473,3 +473,16 @@ class HgraphAdaptorTests(unittest.TestCase):
             replies = self.run_graph(app, [pa.table({"price": [1]})])
         self.assertTrue(graph_progress)
         self.assertEqual(replies, [self.cache.latest("output")[:2]])
+
+    def test_publication_service_accepts_an_unparameterized_frame(self):
+        from hgraph_fabric.hgraph_adaptor import _publish
+        @hg.graph
+        def app(df: hg.TS[hg.Frame]) -> hg.TS[VersionId]:
+            hg.register_service("fabric", fabric_service, cache=self.cache,
+                                transport=self.transport, poll_interval=.001)
+            return _publish(
+                df, "raw", (), (), datetime(2026, 10, 22, tzinfo=UTC), True)
+        replies = self.run_graph(app, [pa.table({"label": ["one"]})])
+        version = self.cache.latest("raw")[:2]
+        self.assertEqual(replies, [version])
+        self.assertEqual(self.cache.get_version(version).to_pydict(), {"label": ["one"]})
