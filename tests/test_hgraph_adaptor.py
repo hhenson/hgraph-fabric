@@ -584,6 +584,10 @@ class HgraphAdaptorTests(unittest.TestCase):
     def test_active_version_subscription_wins_over_passive_frame_subscription(self):
         seed(self.cache, "source", version=101)
 
+        @hg.compute_node
+        def source_key(df: hg.TS[hg.Frame[Prices]]) -> hg.TS[str]:
+            return "source"
+
         @hg.compute_node(active=("version",))
         def stamp(version: hg.TS[VersionId], df: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
             return df.value
@@ -591,7 +595,10 @@ class HgraphAdaptorTests(unittest.TestCase):
         @hg.graph
         def app():
             hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
-            publish(stamp(version_id("source"), subscribe[Prices]("source")), "output")
+            frame = subscribe[Prices]("source")
+            # Subscribe to the active version only after the passive input is
+            # valid; passive inputs do not schedule a node on initial arrival.
+            publish(stamp(version_id(source_key(frame)), frame), "output")
 
         self.run_graph(app)
         self.assertEqual(self.transport.sent[0].dependencies, (("source", 101),))
