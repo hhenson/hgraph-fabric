@@ -340,3 +340,72 @@ the implementation, and add behavioural tests with each component.
 
 MIT, using hgraph's existing licence and copyright notice:
 Copyright (c) 2023 Howard Henson. See [LICENSE](LICENSE).
+
+## hgraph adaptor
+
+Install `hgraph-fabric[hgraph]` and import `hgraph_fabric.hgraph_adaptor`.
+The adaptor targets hgraph 0.8.35's native runtime. Its schema-typed Arrow table
+is named `Frame[Schema]` (the equivalent of `DataFrame[Schema]`). The fabric core
+still imports and runs without hgraph installed.
+
+```python
+from dataclasses import dataclass
+from hgraph import CompoundScalar, graph
+from hgraph_fabric.data_cache import DataCache
+from hgraph_fabric.data_fabric_session import DataFabricTransport
+from hgraph_fabric.hgraph_adaptor import (
+    fabric_service, subscribe, version_id, publish,
+)
+
+@dataclass(frozen=True)
+class Prices(CompoundScalar):
+    price: int
+
+@graph
+def copy_prices():
+    prices = subscribe[Prices]("prices")
+    publish(prices, "prices_copy", dependencies=(version_id("prices"),))
+
+@graph
+def app(cache: DataCache, transport: DataFabricTransport):
+    with fabric_service(cache, transport):
+        copy_prices()
+```
+
+`fabric_service(cache, transport, poll_interval=timedelta(milliseconds=10))`
+is a wiring scope. All its subscriptions share one session and one consistent
+cut, including subscriptions with different row schemas. Components use
+`subscribe[Schema](id: str) -> TS[Frame[Schema]]` and
+`version_id(id: str) -> TS[VersionId]`, where `VersionId` is `tuple[str, int]`.
+The version signal is emitted with the selected table, so it remains independent
+of Arrow/Polars presentation and schema metadata conversion.
+
+`publish(df, id, dependencies, weak_dependencies=())` is a sink. `df` is a typed
+frame time series, and `id` is `TS[str]` or a constant string. Both dependency
+arguments accept a `TSL[TS[VersionId], SIZE]` or a sequence of version time-series
+ports. Strong and weak lists can have different sizes. Pass `()` explicitly for
+a source dataset's strong dependencies. All supplied elements must be valid
+before publication. A fresh table tick or changed ID publishes a new version;
+a dependency-only tick revises the latest version's dependencies. The cache
+suppresses revisions that change only `as_of`. A table received while dependencies
+are incomplete is retained and published when they become valid.
+
+Consumers of an output dataset should subscribe to its ID. The sink does not
+return published data: subscribers receive it only after notification and cut
+selection. Each changed cut is delivered as one graph update, with matching table
+and version signals. The session starts reception before loading subscriptions,
+polls without blocking on the graph thread, and stops the transport with the
+graph. Publications use graph time as their revision timestamp. Simulation can
+exercise deterministic transports; it is not durable historical replay.
+
+Subscription IDs are fixed during static wiring, including ordinary inline
+component graphs. As in the core session, subscribed IDs must already exist in
+storage when the graph starts. Runtime subscription membership and waiting for
+an ID's first publication are not part of this initial adaptor. Subscription
+row schemas are checked using hgraph's `schema_from_frame` field-type mapping.
+
+Automatic dependency inference is deferred. The existing native fabric adaptor
+finds subscription sources by walking upstream wiring, including nested graphs,
+and carries hidden version signals. This wrapper keeps explicit dependency lists
+until that lineage mechanism is added; it does not infer dependencies from every
+subscription in the surrounding scope.
