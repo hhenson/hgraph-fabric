@@ -17,6 +17,10 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 
+[project.optional-dependencies]
+kafka = ["confluent-kafka>=2.6,<3"]
+nats = ["nats-py>=2.9,<3"]
+
 [project.urls]
 Repository = "https://github.com/hhenson/hgraph-fabric"
 Issues = "https://github.com/hhenson/hgraph-fabric/issues"

@@ -146,7 +146,7 @@ and semantics. A later port to Rust or C++ remains an open decision. Integration
 with hgraph will follow once the standalone components are established.
 
 The initial implementation milestone is a working Python core with in-memory
-storage. Durable storage adapters, Kafka and hgraph integration come later.
+storage. Durable storage adapters and hgraph integration come later.
 Individual components and their APIs will be agreed as we build them.
 
 ## Sessions
@@ -211,6 +211,76 @@ waits so the worker can handle publications and shutdown. Transports must honor
 timeouts and callbacks must return for shutdown to finish. Worker failures stop
 processing, release waiting publishers with the error, and propagate on context
 exit. There is no retry or recovery loop.
+
+## Kafka and Core NATS notifications
+
+Install the adapter you need with `pip install 'hgraph-fabric[kafka]'` or
+`pip install 'hgraph-fabric[nats]'`. Both use the existing `DataFabricTransport`
+interface and send the same versioned JSON encoding of `DataUpdateDetails`.
+Arrow tables and revision history remain in shared storage. Use one channel per
+fabric namespace; each session receives all notifications on that channel,
+including local publications and updates to dependencies it does not directly
+subscribe to.
+
+```python
+from hgraph_fabric.data_fabric_session import PollingDataFabricSession
+from hgraph_fabric.transports import KafkaDataFabricTransport, NatsDataFabricTransport
+
+transport = KafkaDataFabricTransport("localhost:9092", "fabric-updates")
+# Alternatively:
+# transport = NatsDataFabricTransport("nats://localhost:4222", "fabric.updates")
+
+# cache must be a fresh DataCache backed by the shared storage.
+with PollingDataFabricSession(cache, transport) as session:
+    session.add_subscriptions(["prices", "positions"])
+    initial = session.poll(0)
+    while True:
+        changes = session.poll(1.0)
+        if changes:
+            consume(changes)
+```
+
+Start reception **before** registering subscriptions, since registration already
+reads metadata. `start()` establishes the live boundary and retains subsequent
+notifications while the initial image loads. The first cut can overlap those
+notifications: duplicates and older revisions do not lower selected heads.
+Newer revisions of historical dependencies still refresh their relevant trees.
+The threaded session helper already follows this startup order.
+
+Kafka requires an existing topic with exactly one partition. Each adapter
+captures its numeric high-watermark offset at startup and assigns that partition
+directly, so every session independently receives subsequent updates. It does
+not replay earlier records, join a balancing group, or commit offsets. Keep the
+topic single-partition, without compaction, and retain records long enough for
+active sessions to consume them. `send()` waits for broker delivery confirmation.
+The optional `config` mapping supplies common client connection/security options.
+
+Core NATS uses a concrete subject without a queue group. Its private asyncio
+thread buffers notifications while the session accesses storage. `start()` waits
+for the server to process the subscription, and `send()` flushes the publication
+to the server. This is live delivery, not persistence. The optional
+`connect_options` mapping supplies authentication/TLS and connection options.
+
+Both adapters expose `timeout=10.0` for startup/send operations. `poll(None)`
+waits indefinitely, `poll(0)` does not wait, and positive timeouts are in seconds.
+Calls belong to the session's owner thread; use the threaded helper for publishing
+from other threads. Stop closes the transport; NATS also joins its client thread.
+Transport and decoding errors propagate. Core NATS reconnect is disabled and
+disconnect/slow-consumer errors fail the session, since notifications may have
+been lost. Restart with a new session and fresh cache to rebuild from storage.
+
+Publishers must make tables and metadata readable before sending notifications.
+Storage writes and notification sends are separate operations; a failed send
+still fails the process rather than attempting recovery.
+
+Broker contract tests run in CI against Kafka and Core NATS. To run them against
+your own test brokers (Kafka tests create and delete temporary topics):
+
+```sh
+python -m pip install -e '.[kafka,nats]'
+HGRAPH_FABRIC_KAFKA=localhost:9092 HGRAPH_FABRIC_NATS=nats://localhost:4222 \
+    python -m unittest discover -s tests -p test_notification_brokers.py -v
+```
 
 ## Design reference
 

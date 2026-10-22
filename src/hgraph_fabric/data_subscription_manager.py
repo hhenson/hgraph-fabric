@@ -80,7 +80,9 @@ class DataSubscriptionManager:
                     # One waiting root may still be blocked by another input.
                     # Allow the next affected root to drive an attempt instead.
             return set()
-        subscription.latest_revision = revision
+        # Startup can load an image newer than queued notifications. Preserve
+        # the root head, but still process historical dependency revisions above.
+        subscription.latest_revision = max(subscription.latest_revision or revision, revision)
         self._index_dependencies(subscription)
         return self._try_advance(subscription)
 

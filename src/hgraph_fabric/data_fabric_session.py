@@ -68,7 +68,13 @@ class DataFabricTransport(Protocol):
     transport; dependency notifications must reach interested sessions too.
     """
 
-    def start(self) -> None: ...
+    def start(self) -> None:
+        """Establish reception before loading subscriptions; retain incoming updates.
+
+        Start from the live boundary, without replaying earlier publications.
+        Storage must expose each publication before its notification is sent.
+        """
+        ...
 
     def stop(self) -> None: ...
 

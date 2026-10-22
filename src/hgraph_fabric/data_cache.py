@@ -176,6 +176,10 @@ class DataCache(ABC):
             as_of=update.as_of,
         )
         version_id = revision_id[:2]
+        if latest[:2] != version_id and version_id not in self._latest_revisions:
+            # A late notification does not establish the maximum count of an
+            # unvisited historical version. Resolve it from history on demand.
+            return
         version_latest = latest if latest[:2] == version_id else revision_id
         self._latest_revisions[version_id] = max(
             self._latest_revisions.get(version_id, revision_id), version_latest,
