@@ -499,3 +499,202 @@ class HgraphAdaptorTests(unittest.TestCase):
         self.assertEqual(len(self.transport.sent), 1)
         self.assertEqual(self.transport.sent[0].dependencies, ())
         self.assertEqual(self.transport.sent[0].weak_dependencies, ())
+
+    def test_automatic_dependencies_follow_inline_graphs_and_deduplicate_sources(self):
+        seed(self.cache, "source", version=101)
+        seed(self.cache, "unused", version=202)
+
+        @hg.compute_node
+        def combine(a: hg.TS[hg.Frame[Prices]], b: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
+            return a.value
+
+        @hg.graph
+        def inner():
+            return combine(subscribe[Prices]("source"), subscribe[Prices]("source"))
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            subscribe[Prices]("unused")
+            publish(inner(), "output")
+
+        self.run_graph(app)
+        self.assertEqual(len(self.transport.sent), 1)
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 101),))
+        self.assertEqual(self.transport.sent[0].weak_dependencies, ())
+
+    def test_automatic_source_publication_has_no_dependencies(self):
+        @hg.graph
+        def app(df: hg.TS[hg.Frame[Prices]]):
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(df, "output")
+        self.run_graph(app, [pa.table({"price": [1]})])
+        self.assertEqual(len(self.transport.sent), 1)
+        self.assertEqual(self.transport.sent[0].dependencies, ())
+        self.assertEqual(self.transport.sent[0].weak_dependencies, ())
+
+    def test_automatic_weak_versions_do_not_trigger_publication_but_are_sampled_on_next_tick(self):
+        seed(self.cache, "active", version=100)
+        seed(self.cache, "passive", version=100)
+        observed = {}
+
+        @hg.compute_node(active=("a",))
+        def sample(a: hg.TS[hg.Frame[Prices]], b: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
+            return a.value
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(sample(subscribe[Prices]("active"), subscribe[Prices]("passive")), "output")
+
+        def updates(transport):
+            if not transport.sent:
+                return
+            if "weak_at" not in observed:
+                _, update = seed(self.cache, "passive", value=2, version=200)
+                transport.pending.append(update)
+                observed["weak_at"] = transport.polls
+                observed["initial_count"] = len(transport.sent)
+            elif "checked" not in observed and transport.polls > observed["weak_at"] + 20:
+                observed["checked"] = len(transport.sent)
+                _, update = seed(self.cache, "active", value=2, version=200)
+                transport.pending.append(update)
+
+        self.transport.on_poll = updates
+        self.run_graph(app)
+        self.assertEqual(observed["initial_count"], 1)
+        self.assertEqual(observed["checked"], 1)
+        self.assertEqual(len(self.transport.sent), 2)
+        self.assertEqual(self.transport.sent[0].weak_dependencies, (("passive", 100),))
+        self.assertEqual(self.transport.sent[-1].dependencies, (("active", 200),))
+        self.assertEqual(self.transport.sent[-1].weak_dependencies, (("passive", 200),))
+
+    def test_automatic_active_path_wins_over_a_transitive_passive_path(self):
+        seed(self.cache, "a", version=101)
+        seed(self.cache, "b", version=202)
+
+        @hg.compute_node(active=("clock",))
+        def sample(clock: hg.TS[hg.Frame[Prices]], value: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
+            return value.value
+
+        @hg.compute_node
+        def join(a: hg.TS[hg.Frame[Prices]], b: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
+            return a.value
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            a, b = subscribe[Prices]("a"), subscribe[Prices]("b")
+            publish(join(sample(b, a), a), "output")
+
+        self.run_graph(app)
+        self.assertEqual(self.transport.sent[-1].dependencies, (("a", 101), ("b", 202)))
+        self.assertEqual(self.transport.sent[-1].weak_dependencies, ())
+
+    def test_automatic_versions_publish_dependency_revisions_when_frames_are_suppressed(self):
+        seed(self.cache, "source", version=100)
+        advanced = []
+
+        @hg.compute_node
+        def once(data: hg.TS[hg.Frame[Prices]], state: hg.STATE = None) -> hg.TS[hg.Frame[Prices]]:
+            if not getattr(state, "emitted", False):
+                state.emitted = True
+                return data.value
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(once(subscribe[Prices]("source")), "output")
+
+        def updates(transport):
+            if transport.sent and not advanced:
+                advanced.append(True)
+                _, update = seed(self.cache, "source", value=2, version=200)
+                transport.pending.append(update)
+
+        self.transport.on_poll = updates
+        self.run_graph(app)
+        self.assertEqual(len(self.transport.sent), 2)
+        first, second = self.transport.sent
+        self.assertEqual((first.id, first.revision[0]), (second.id, second.revision[0]))
+        self.assertEqual(second.revision[1], 1)
+        self.assertEqual(second.dependencies, (("source", 200),))
+
+    def test_explicit_dependencies_disable_automatic_discovery(self):
+        seed(self.cache, "source", version=100)
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(subscribe[Prices]("source"), "output", dependencies=())
+        self.run_graph(app)
+        self.assertEqual(self.transport.sent[0].dependencies, ())
+
+    def test_automatic_dependencies_follow_dynamic_subscription_ids(self):
+        seed(self.cache, "a", version=101)
+        seed(self.cache, "b", version=202)
+        @hg.graph
+        def app(id: hg.TS[str]):
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(subscribe[Prices](id), "output")
+        self.run_graph(app, ["a", None, "b"])
+        self.assertEqual(self.transport.sent[-1].dependencies, (("b", 202),))
+
+    def test_automatic_discovery_stops_at_subscription_boundaries(self):
+        seed(self.cache, "ancestor", version=100)
+        seed(self.cache, "source", version=200, dependencies=(("ancestor", 100),))
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(subscribe[Prices]("source"), "output")
+        self.run_graph(app)
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 200),))
+
+    def test_automatic_dependencies_reject_unresolved_compiled_inputs(self):
+        @hg.compute_node
+        def copied(df: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
+            return df.value
+        @hg.graph
+        def child(df: hg.TS[hg.Frame[Prices]]):
+            publish(copied(df), "output")
+        @hg.graph
+        def app(values: hg.TSD[str, hg.TS[hg.Frame[Prices]]]):
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            hg.map_(child, values)
+        with self.assertRaisesRegex(Exception, "provide explicit dependencies"):
+            self.run_graph(app, [{"a": pa.table({"price": [1]})}])
+        self.assertEqual(self.transport.starts, 0)
+
+    def test_automatic_dependencies_keep_explicit_weak_notifications_active(self):
+        seed(self.cache, "source", version=100)
+        @hg.graph
+        def app(weak: hg.TS[VersionId]):
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(subscribe[Prices]("source"), "output", weak_dependencies=(weak,))
+        self.run_graph(app, [("reference", 1), None, ("reference", 2)])
+        self.assertEqual(self.transport.sent[-1].dependencies, (("source", 100),))
+        self.assertEqual(self.transport.sent[-1].weak_dependencies, (("reference", 2),))
+
+    def test_explicit_weak_alias_of_automatic_strong_dependency_is_removed(self):
+        seed(self.cache, "source", version=100)
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(subscribe[Prices]("source"), "output", weak_dependencies=(version_id("source"),))
+        self.run_graph(app)
+        self.assertEqual(self.transport.sent[-1].dependencies, (("source", 100),))
+        self.assertEqual(self.transport.sent[-1].weak_dependencies, ())
+
+    def test_automatic_dependencies_preserve_activity_after_error_capture(self):
+        seed(self.cache, "source", version=100)
+        @hg.compute_node
+        def copied(df: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
+            return df.value
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            output = copied(subscribe[Prices]("source"))
+            hg.exception_time_series(output)
+            publish(output, "output")
+        self.run_graph(app)
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 100),))
+        self.assertEqual(self.transport.sent[0].weak_dependencies, ())

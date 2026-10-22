@@ -9,6 +9,9 @@ permissions:
 
 jobs:
   package:
+    env:
+      # The hgraph inspection API is temporarily pinned to a source commit.
+      CMAKE_BUILD_PARALLEL_LEVEL: "2"
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
