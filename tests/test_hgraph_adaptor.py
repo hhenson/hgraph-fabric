@@ -481,8 +481,21 @@ class HgraphAdaptorTests(unittest.TestCase):
             hg.register_service("fabric", fabric_service, cache=self.cache,
                                 transport=self.transport, poll_interval=.001)
             return _publish(
-                df, "raw", (), (), datetime(2026, 10, 22, tzinfo=UTC), True)
+                df, "raw", (), (), hg.last_modified_time(df))
         replies = self.run_graph(app, [pa.table({"label": ["one"]})])
         version = self.cache.latest("raw")[:2]
         self.assertEqual(replies, [version])
         self.assertEqual(self.cache.get_version(version).to_pydict(), {"label": ["one"]})
+
+    def test_empty_tsl_dependencies_allow_publication(self):
+        @hg.graph
+        def app(df: hg.TS[hg.Frame[Prices]]) -> hg.TS[VersionId]:
+            hg.register_service("fabric", fabric_service, cache=self.cache,
+                                transport=self.transport, poll_interval=.001)
+            empty = hg.const((), tp=hg.TSL[hg.TS[VersionId], hg.Size[0]])
+            return publish(df, "output", empty, empty)
+        replies = self.run_graph(app, [pa.table({"price": [1]})])
+        self.assertEqual(replies, [self.cache.latest("output")[:2]])
+        self.assertEqual(len(self.transport.sent), 1)
+        self.assertEqual(self.transport.sent[0].dependencies, ())
+        self.assertEqual(self.transport.sent[0].weak_dependencies, ())

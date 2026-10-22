@@ -7,9 +7,9 @@ from threading import Thread
 from typing import TypeVar, get_type_hints
 
 from hgraph import (
-    AUTO_RESOLVE, COMPOUND_SCALAR, SIZE, STATE, TS, TSB, TSD, TSL, TSS,
+    AUTO_RESOLVE, COMPOUND_SCALAR, SIZE, SCHEMA, STATE, TS, TSB, TSD, TSL, TSS,
     REMOVE, EvaluationEngineApi, Frame, Size, TimeSeriesSchema, compute_node,
-    const, graph, impl_input, impl_output, push_queue, request_reply_service,
+    const, convert, graph, impl_input, impl_output, last_modified_time, push_queue, request_reply_service,
     service_impl, sink_node, subscription_service,
 )
 from hgraph._frame import as_arrow_table
@@ -40,16 +40,7 @@ def version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]:
 def _publish(df: TS[Frame], id: TS[str],
              dependencies: TS[tuple[VersionId, ...]],
              weak_dependencies: TS[tuple[VersionId, ...]],
-             as_of: TS[datetime], new_version: TS[bool], path: str = "fabric") -> TS[VersionId]: ...
-
-
-class _PublicationInputs(TimeSeriesSchema):
-    df: TS[Frame]
-    id: TS[str]
-    dependencies: TS[tuple[VersionId, ...]]
-    weak_dependencies: TS[tuple[VersionId, ...]]
-    as_of: TS[datetime]
-    new_version: TS[bool]
+             data_time: TS[datetime], path: str = "fabric") -> TS[VersionId]: ...
 
 
 @graph
@@ -87,35 +78,20 @@ def publish(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
     """
     def inputs(value):
         if isinstance(value, (tuple, list)):
-            return (TSL.from_ts(*value, tp=TS[VersionId]) if value
-                    else const((), tp=TSL[TS[VersionId], Size[0]]))
-        return value
-    request = _publication(df, id, inputs(dependencies), inputs(weak_dependencies))
-    return _publish(request.df, request.id, request.dependencies,
-                    request.weak_dependencies, request.as_of, request.new_version, path=path)
+            if not value:
+                return const((), tp=TS[tuple[VersionId, ...]])
+            value = TSL.from_ts(*value, tp=TS[VersionId])
+        return _dependency_ids(value)
+    return _publish(df, id, inputs(dependencies), inputs(weak_dependencies),
+                    last_modified_time(df), path=path)
 
 
-@compute_node(valid=("df", "id"))
-def _publication(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
-                 dependencies: TSL[TS[VersionId], SIZE],
-                 weak_dependencies: TSL[TS[VersionId], WEAK_SIZE],
-                 _state: STATE = None, _api: EvaluationEngineApi = None) -> TSB[_PublicationInputs]:
-    if ((len(dependencies) and not dependencies.all_valid)
-            or (len(weak_dependencies) and not weak_dependencies.all_valid)):
-        return
-    # Retain a table tick until all dependencies are valid, even when they
-    # arrive in a later cycle. Each client tracks its own publication inputs.
-    new_table = (getattr(_state, "data_time", None) != df.last_modified_time
-                 or getattr(_state, "id", None) != id.value)
-    request = dict(
-        id=id.value, new_version=new_table,
-        dependencies=tuple(dependencies.value) if len(dependencies) else (),
-        weak_dependencies=tuple(weak_dependencies.value) if len(weak_dependencies) else (),
-        as_of=_api.evaluation_clock.evaluation_time.replace(tzinfo=UTC))
-    if new_table:
-        request["df"] = as_arrow_table(df.value)
-    _state.id, _state.data_time = id.value, df.last_modified_time
-    return request
+@graph
+def _dependency_ids(dependencies: TSL[TS[VersionId], SIZE],
+                    size: type[SIZE] = AUTO_RESOLVE) -> TS[tuple[VersionId, ...]]:
+    if size.SIZE == 0:
+        return const((), tp=TS[tuple[VersionId, ...]])
+    return convert[TS[tuple[VersionId, ...]]](dependencies)
 
 
 class _FabricIO(TimeSeriesSchema):
@@ -210,18 +186,29 @@ def _responses(event: TS[object]) -> TSB[_FabricIO]:
 
 @sink_node(valid=())
 def _requests(data_ids: TSS[str], version_ids: TSS[str],
-              publications: TSD[int, TSB[_PublicationInputs]], worker: _Worker):
+              publications: TSD[int, TSB[SCHEMA]], worker: _Worker,
+              _state: STATE = None, _api: EvaluationEngineApi = None):
     keys = frozenset(data_ids.value if data_ids.valid else ()) | frozenset(
         version_ids.value if version_ids.valid else ())
-    # Service transport snapshots can re-tick retained fields. Carry the
-    # publication intent explicitly instead of treating df.modified as new data.
-    requests = tuple((key, _Publication(
-        as_arrow_table(value.df.value) if value.new_version.value else None,
-        value.id.value, tuple(value.dependencies.value), tuple(value.weak_dependencies.value),
-        value.as_of.value.replace(tzinfo=UTC))) for key, value in publications.modified_items()
-        if value.all_valid) if publications.valid else ()
+    previous = getattr(_state, "previous", {})
+    requests = []
+    if publications.valid:
+        for key, value in publications.modified_items():
+            if not value.all_valid:
+                continue
+            # Request snapshots can re-tick the retained frame. Its original
+            # tick time identifies new data without comparing table contents.
+            identity = value.id.value, value.data_time.value
+            requests.append((key, _Publication(
+                as_arrow_table(value.df.value) if previous.get(key) != identity else None,
+                value.id.value, tuple(value.dependencies.value), tuple(value.weak_dependencies.value),
+                _api.evaluation_clock.evaluation_time.replace(tzinfo=UTC))))
+            previous[key] = identity
     retired = tuple(publications.removed_keys()) if publications.valid else ()
-    worker.commands.put((keys, requests, retired))
+    for key in retired:
+        previous.pop(key, None)
+    _state.previous = previous
+    worker.commands.put((keys, tuple(requests), retired))
 
 
 @service_impl(interfaces=(_subscribe, version_id, _publish))

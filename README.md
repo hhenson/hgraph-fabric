@@ -374,7 +374,7 @@ def app(cache: DataCache, transport: DataFabricTransport):
 
 One `@service_impl` serves two subscription interfaces (tables and versions)
 and one request-reply interface (publication). The publication interface takes
-`TS[Frame]` with typed ID, dependency, timestamp and new-version inputs.
+`TS[Frame]` with typed ID, dependency and original frame-tick-time inputs.
 Typed client wrappers convert
 frames and dependency lists at the boundary, so different schemas and TSL sizes
 share the same implementation and consistent cut. The service uses a push source
