@@ -12,10 +12,19 @@ AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 class UpdateOnlyCache(DataCache):
-    """All available records arrive through the real DataCache.apply_update."""
+    """Persist incoming heads before delivering the real cache notification."""
+
+    def __init__(self):
+        super().__init__()
+        self.heads = {}
+
+    def apply_update(self, update):
+        revision = (update.id, *update.revision)
+        self.heads[update.id] = max(self.heads.get(update.id, revision), revision)
+        super().apply_update(update)
 
     def load_latest(self, data_id):
-        raise KeyError(data_id)
+        return self.heads[data_id]
 
     def load_revision(self, revision_id):
         raise KeyError(revision_id)
@@ -193,8 +202,10 @@ class SubscriptionUpdateTests(unittest.TestCase):
 
     def test_lowered_updated_proposal_rechecks_earlier_latest_matches(self):
         for data_id, versions in (("x", (1, 2)), ("y", (0, 1, 2))):
+            previous = None
             for version in versions:
-                self.cache.apply_update(self.update(data_id, version))
+                self.cache.apply_update(self.update(data_id, version, previous=previous))
+                previous = (version, 0)
         for data_id, dependencies in (
             ("a", (("x", 1), ("y", 0))), ("b", (("x", 1),)), ("c", (("y", 0),)),
         ):

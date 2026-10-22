@@ -108,6 +108,13 @@ starts there and follows the `(version, revision_count)` pair in
 data ID. That pair identifies the previous version and its maximum revision;
 `None` marks the end of the chain.
 
+Notifications for an ID whose head has not been loaded are retained as hints.
+The first `latest` lookup combines those hints with the stored head, so an older
+notification cannot hide a newer version that predates the session. Historical
+version lookups likewise combine notified counts with their stored history link.
+Pending hints are retired as those lookups resolve; notifications alone do not
+make an unseen head available through `peek_latest`.
+
 `peek_latest(data_id)`, `peek_version(version_id)`, `peek_revision(revision_id)`,
 and `peek_latest_revision(version_id)` return the corresponding cached value or
 `None`. They do not load from storage or walk history; `peek_version` returns the

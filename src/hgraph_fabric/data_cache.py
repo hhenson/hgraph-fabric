@@ -23,6 +23,7 @@ class DataCache(ABC):
         self._revisions: dict[DataRevisionId, DataRevisionDetails] = {}
         self._latest_revisions: dict[DataVersionId, DataRevisionId] = {}
         self._pending_revision_heads: dict[DataVersionId, DataRevisionId] = {}
+        self._pending_latest_heads: dict[DataId, DataRevisionId] = {}
 
     def cached_ids(self) -> set[DataId]:
         """Return IDs with any cached data or metadata, without loading."""
@@ -49,7 +50,10 @@ class DataCache(ABC):
 
     def latest(self, data_id: DataId) -> DataRevisionId:
         if data_id not in self._latest:
-            self._latest[data_id] = self.load_latest(data_id)
+            stored = self.load_latest(data_id)
+            latest = max(stored, self._pending_latest_heads.pop(data_id, stored))
+            self._latest[data_id] = latest
+            self._pending_revision_heads.pop(latest[:2], None)
         return self._latest[data_id]
 
     def get_version(self, version_id: DataVersionId) -> Table:
@@ -122,6 +126,7 @@ class DataCache(ABC):
             as_of=as_of,
         )
         self._data[(id, version)] = data
+        self._latest[id] = revision_id  # This write has just established the stored head.
         self.apply_update(update)
         return data, update
 
@@ -170,8 +175,15 @@ class DataCache(ABC):
         revision_id = (update.id, *update.revision)
         # Local writes may already be ahead of their notifications. An older
         # echo must not lower the head used to allocate the next version.
-        latest = max(self._latest.get(update.id, revision_id), revision_id)
-        self._latest[update.id] = latest
+        latest = self._latest.get(update.id)
+        if latest is not None:
+            latest = self._latest[update.id] = max(latest, revision_id)
+        else:
+            # Reception starts without replay: a first notification can concern
+            # an older version than the head already present in shared storage.
+            self._pending_latest_heads[update.id] = max(
+                self._pending_latest_heads.get(update.id, revision_id), revision_id,
+            )
         self._revisions[revision_id] = DataRevisionDetails(
             dependencies=update.dependencies,
             weak_dependencies=update.weak_dependencies,
@@ -179,7 +191,7 @@ class DataCache(ABC):
             as_of=update.as_of,
         )
         version_id = revision_id[:2]
-        if latest[:2] != version_id and version_id not in self._latest_revisions:
+        if latest is None or (latest[:2] != version_id and version_id not in self._latest_revisions):
             # A notification is a lower bound until history is loaded: it may
             # lag the stored count or advance beyond the count in the link.
             self._pending_revision_heads[version_id] = max(
