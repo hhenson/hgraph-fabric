@@ -207,3 +207,25 @@ class NotificationStartupTests(unittest.TestCase):
         self.assertEqual(sub.latest_revision, ("middle", 200, 0))
         self.assertEqual(manager.get_consistent_cut(), {("middle", 200)})
         self.assertEqual(cache.get_latest_revision(("middle", 100)), ("middle", 100, 1))
+
+    def test_history_iterators_include_pending_and_resolved_revision_heads(self):
+        history = History()
+        history.add("middle", 100)
+        history.add("middle", 200)
+        cache = HistoryCache(history)
+        self.assertEqual(cache.latest("middle"), ("middle", 200, 0))
+        cache.apply_update(history.add("middle", 100, 1))
+        expected = [("middle", 200, 0), ("middle", 100, 1)]
+        self.assertEqual(list(cache.peek_version_history("middle")), expected[:1])
+        self.assertEqual(list(cache.version_history("middle")), expected)
+        cache.loads.clear()
+        self.assertEqual(list(cache.peek_version_history("middle")), expected)
+        self.assertEqual(cache.loads, [])
+        self.assertEqual(cache.get_latest_revision(("middle", 100)), expected[1])
+        # Resolving the hint into the per-version cache must preserve iteration.
+        for history_fn in (cache.version_history, cache.peek_version_history):
+            self.assertEqual(list(history_fn("middle")), expected)
+        cache.apply_update(history.add("middle", 100, 2))
+        expected[1] = ("middle", 100, 2)
+        for history_fn in (cache.version_history, cache.peek_version_history):
+            self.assertEqual(list(history_fn("middle")), expected)

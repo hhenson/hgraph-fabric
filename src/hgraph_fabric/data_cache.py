@@ -135,9 +135,8 @@ class DataCache(ABC):
         if version_id not in self._latest_revisions:
             for revision_id in self.version_history(version_id[0]):
                 if revision_id[:2] == version_id:
-                    self._latest_revisions[version_id] = max(
-                        revision_id, self._pending_revision_heads.pop(version_id, revision_id),
-                    )
+                    self._latest_revisions[version_id] = revision_id
+                    self._pending_revision_heads.pop(version_id, None)
                     break
             else:
                 raise KeyError(version_id)
@@ -156,6 +155,14 @@ class DataCache(ABC):
         while revision_id is not None:
             if revision_id[0] != data_id:
                 raise ValueError("Version history points to a different data ID")
+            # A stored link captures a count at publication time. Include later
+            # notifications, whether still pending or already resolved by lookup.
+            version_id = revision_id[:2]
+            revision_id = max(
+                revision_id,
+                self._pending_revision_heads.get(version_id, revision_id),
+                self._latest_revisions.get(version_id, revision_id),
+            )
             yield revision_id
             # Only revision zero carries the link to the previous sparse
             # version and its maximum count. Never subtract from a version ID.
