@@ -5,6 +5,14 @@ from .data_graph import DataEdgeGraph
 from .data_structures import DataId, DataRevisionId, DataVersionId
 
 
+class InconsistentDependencyError(ValueError):
+    """Well-formed records currently require different versions of one ID."""
+
+    def __init__(self, revision: DataRevisionId, dependencies: set[DataVersionId]) -> None:
+        super().__init__(f"Dependency paths disagree for revision {revision!r}")
+        self.dependencies = dependencies
+
+
 class DataSubscriptionGraph:
     """Retain full strong-dependency trees for one subscribed data ID."""
 
@@ -82,20 +90,30 @@ class DataSubscriptionGraph:
                 return self._revision_graphs[revision_id]
             # Also cover historical search trees and cache updates received
             # outside the manager. A root key alone is not a freshness stamp.
-        graph = DataEdgeGraph()
+        edges = []
         dependencies = {}
         pending = deque([revision_id])
         queued = {revision_id[:2]}
         while pending:
             current = pending.popleft()
             details = cache.get_revision(current)
+            required_versions = {current[0]: current[1]}
             for dependency in details.dependencies or ():
-                graph.add((current[:2], dependency))
+                if required_versions.setdefault(dependency[0], dependency[1]) != dependency[1]:
+                    raise ValueError(f"Conflicting version for data ID {dependency[0]!r}")
+                edges.append((current[:2], dependency))
                 if dependency not in queued:
                     dependencies[dependency] = cache.get_latest_revision(dependency)
                     pending.append(dependencies[dependency])
                     queued.add(dependency)
 
+        # Load and validate every reachable record before classifying a
+        # cross-record mismatch as temporary. Missing/malformed storage must
+        # still fail, even on a path beyond the first mismatching edge.
+        try:
+            graph = DataEdgeGraph(edges)
+        except ValueError as error:
+            raise InconsistentDependencyError(revision_id, set(dependencies)) from error
         self._revision_graphs[revision_id] = graph
         self._dependency_revisions[revision_id] = dependencies
         return graph

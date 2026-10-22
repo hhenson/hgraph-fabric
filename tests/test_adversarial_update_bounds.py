@@ -118,8 +118,13 @@ class UpdateBoundTests(unittest.TestCase):
         a = manager.add_subscription("a")
         manager.get_consistent_cut()
         graph = a.current(manager._cache)
-        with self.assertRaises(ValueError):
-            manager.apply_update(history.add("a", 9000, dependencies=(("middle", 100), ("x", 2))))
+        self.assertEqual(manager.apply_update(
+            history.add("a", 9000, dependencies=(("middle", 100), ("x", 2)))
+        ), set())
         self.assertEqual(a.current_revision, ("a", 100, 0))
         self.assertIs(a.current(manager._cache), graph)
         self.assertNotIn(("a", 9000, 0), a._revision_graphs)
+        self.assertEqual(manager.apply_update(
+            history.add("middle", 100, 1, dependencies=(("x", 2),))
+        ), {("a", 9000)})
+        self.assertTrue(history.consistent(current_cut(manager)))

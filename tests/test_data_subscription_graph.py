@@ -223,6 +223,8 @@ class DataSubscriptionGraphTests(unittest.TestCase):
             ("root", 1, 1): DataRevisionDetails((("a", 1), ("b", 1)), None, None, as_of=AS_OF),
             ("a", 1, 1): DataRevisionDetails((("shared", 1),), None, None, as_of=AS_OF),
             ("b", 1, 1): DataRevisionDetails((("shared", 2),), None, None, as_of=AS_OF),
+            ("shared", 1, 1): DataRevisionDetails(None, None, None, as_of=AS_OF),
+            ("shared", 2, 1): DataRevisionDetails(None, None, None, as_of=AS_OF),
         }
         cache = Mock(spec=DataCache)
         cache.get_revision.side_effect = revisions.__getitem__
