@@ -163,3 +163,30 @@ class NotificationStartupTests(unittest.TestCase):
         manager.get_consistent_cut()
         self.assertEqual(cache.get_latest_revision(("middle", 100)), ("middle", 100, 3))
         self.assertTrue(sub.current(cache).has_node(("x", 2)))
+
+    def test_live_revisions_of_unvisited_historical_version_survive_history_lookup(self):
+        for counts in ((1,), (1, 3, 1), (3, 1, 3)):
+            with self.subTest(counts=counts):
+                history = History()
+                history.add("x", 1)
+                history.add("x", 2)
+                history.add("middle", 100, dependencies=(("x", 1),))
+                history.add("middle", 200)  # Its history link records count zero.
+                history.add("a", 100, dependencies=(("middle", 100),))
+                history.add("b", 100, dependencies=(("x", 2),))
+                cache = HistoryCache(history)
+                manager = DataSubscriptionManager(cache)
+                self.assertEqual(cache.latest("middle"), ("middle", 200, 0))
+                cache.loads.clear()
+                for count in counts:
+                    update = history.add("middle", 100, count, dependencies=(("x", 2),))
+                    self.assertEqual(manager.apply_update(update), set())
+                # Notifications retain their information without eagerly loading
+                # history for versions no subscription currently needs.
+                self.assertEqual(cache.loads, [])
+                self.assertEqual(cache.latest("middle"), ("middle", 200, 0))
+                self.assertEqual(cache.get_latest_revision(("middle", 100)),
+                                 ("middle", 100, max(counts)))
+                manager.add_subscriptions(("a", "b"))
+                self.assertEqual(manager.get_consistent_cut(), {("a", 100), ("b", 100)})
+                self.assertTrue(history.consistent(current_cut(manager)))

@@ -22,6 +22,7 @@ class DataCache(ABC):
         self._data: dict[DataVersionId, Table] = {}
         self._revisions: dict[DataRevisionId, DataRevisionDetails] = {}
         self._latest_revisions: dict[DataVersionId, DataRevisionId] = {}
+        self._pending_revision_heads: dict[DataVersionId, DataRevisionId] = {}
 
     def cached_ids(self) -> set[DataId]:
         """Return IDs with any cached data or metadata, without loading."""
@@ -129,7 +130,9 @@ class DataCache(ABC):
         if version_id not in self._latest_revisions:
             for revision_id in self.version_history(version_id[0]):
                 if revision_id[:2] == version_id:
-                    self._latest_revisions[version_id] = revision_id
+                    self._latest_revisions[version_id] = max(
+                        revision_id, self._pending_revision_heads.pop(version_id, revision_id),
+                    )
                     break
             else:
                 raise KeyError(version_id)
@@ -177,8 +180,11 @@ class DataCache(ABC):
         )
         version_id = revision_id[:2]
         if latest[:2] != version_id and version_id not in self._latest_revisions:
-            # A late notification does not establish the maximum count of an
-            # unvisited historical version. Resolve it from history on demand.
+            # A notification is a lower bound until history is loaded: it may
+            # lag the stored count or advance beyond the count in the link.
+            self._pending_revision_heads[version_id] = max(
+                self._pending_revision_heads.get(version_id, revision_id), revision_id,
+            )
             return
         version_latest = latest if latest[:2] == version_id else revision_id
         self._latest_revisions[version_id] = max(
