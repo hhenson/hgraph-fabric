@@ -74,6 +74,65 @@ class SubscriptionUpdateTests(unittest.TestCase):
         self.assertIs(a.current(self.cache), graph)
         self.assertEqual(a.current_revision, ("a", 100, 0))
 
+    def test_sibling_revisions_can_arrive_separately_with_different_versions(self):
+        for order in (("left", "right"), ("right", "left")):
+            with self.subTest(order=order):
+                self.setUp()
+                for version in (1, 2):
+                    self.cache.apply_update(self.update(
+                        "leaf", version, previous=(1, 0) if version == 2 else None
+                    ))
+                    self.cache.apply_update(self.update(
+                        "x", version, dependencies=(("leaf", version),),
+                        previous=(1, 0) if version == 2 else None,
+                    ))
+                for sibling in order:
+                    self.cache.apply_update(self.update(
+                        sibling, 100, dependencies=(("x", 1),)
+                    ))
+                self.cache.apply_update(self.update(
+                    "root", 100, dependencies=(("left", 100), ("right", 100))
+                ))
+                root = self.manager.add_subscription("root")
+                self.manager.get_consistent_cut()
+
+                # The first sibling temporarily disagrees with the other.
+                # Index both paths without trying to select a dependency tree.
+                self.assertEqual(self.manager.apply_update(self.update(
+                    order[0], 100, 1, dependencies=(("x", 2),)
+                )), set())
+                self.assertEqual(root.current_revision, ("root", 100, 0))
+                for data_id in ("x", "leaf"):
+                    for version in (1, 2):
+                        self.assertEqual(self.manager._dependents[(data_id, version)], {"root"})
+
+                self.assertEqual(self.manager.apply_update(self.update(
+                    order[1], 100, 1, dependencies=(("x", 2),)
+                )), set())
+                self.assertEqual(self.manager.get_consistent_cut(), {("root", 100)})
+                self.assertTrue(root.current(self.cache).has_node(("x", 2)))
+                for data_id in ("x", "leaf"):
+                    self.assertNotIn((data_id, 1), self.manager._dependents)
+                    self.assertEqual(self.manager._dependents[(data_id, 2)], {"root"})
+
+    def test_dependency_index_rejects_conflicting_versions_in_one_record(self):
+        for dependencies in ((("x", 1), ("x", 2)), (("middle", 200),)):
+            with self.subTest(dependencies=dependencies):
+                self.setUp()
+                for version in (1, 2):
+                    self.cache.apply_update(self.update(
+                        "x", version, previous=(1, 0) if version == 2 else None
+                    ))
+                self.cache.apply_update(self.update("middle", 100, dependencies=(("x", 1),)))
+                self.cache.apply_update(self.update("root", 100, dependencies=(("middle", 100),)))
+                root = self.manager.add_subscription("root")
+                self.manager.get_consistent_cut()
+                before = {key: set(value) for key, value in self.manager._dependents.items()}
+                with self.assertRaisesRegex(ValueError, "Conflicting version"):
+                    self.manager.apply_update(self.update("middle", 100, 1, dependencies=dependencies))
+                self.assertEqual(root.current_revision, ("root", 100, 0))
+                self.assertEqual(self.manager._dependents, before)
+
     def test_update_before_first_cut_initializes_subscriptions(self):
         self.cache.apply_update(self.update("a", 100))
         self.cache.apply_update(self.update("b", 100))
