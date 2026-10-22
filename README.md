@@ -176,6 +176,14 @@ publication API. Register roots with `add_subscription` or `add_subscriptions`.
 data versions advanced. Tables are loaded through the cache after selection.
 Blocked updates and revision-count-only changes return an empty mapping.
 
+Dependency-only revisions can arrive separately, temporarily making two paths
+require different versions of the same dependency. The manager tracks both
+paths and keeps the last accepted cut while a proposed tree is inconsistent.
+A notification for a watched dependency version retries the pending cut, even
+with only one subscribed root. Before the first cut, polling waits for such an
+update. Missing records and conflicting requirements within one record still
+raise errors.
+
 `publish(data=None, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
 returns the cache's `(Table, DataUpdateDetails)` result. The external driver
 delivers that update to each associated session before further cut operations,

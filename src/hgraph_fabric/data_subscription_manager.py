@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from .consistent_cut import NoConsistentCutError, find_consistent_cut
 from .data_cache import DataCache
 from .data_structures import DataId, DataRevisionId, DataUpdateDetails, DataVersionId
-from .data_subscription_graph import DataSubscriptionGraph
+from .data_subscription_graph import DataSubscriptionGraph, InconsistentDependencyError
 
 
 class DataSubscriptionManager:
@@ -18,14 +18,18 @@ class DataSubscriptionManager:
         self._subscription_dependencies: dict[DataId, set[DataVersionId]] = {}
         self._conflicts: dict[DataVersionId, set[DataId]] = {}
         self._dirty_subscriptions: set[DataId] = set()
+        self._pending_cuts: dict[DataId, set[DataVersionId]] = {}
 
     def add_subscription(self, data_id: DataId) -> DataSubscriptionGraph:
         if data_id not in self._subscriptions:
             subscription = DataSubscriptionGraph(data_id)
             subscription.latest_revision = self._cache.latest(data_id)
-            subscription.latest(self._cache)
-            self._subscriptions[data_id] = subscription
+            try:
+                subscription.latest(self._cache)
+            except InconsistentDependencyError:
+                pass  # Register both paths; initialization waits for a cut.
             self._index_dependencies(subscription)
+            self._subscriptions[data_id] = subscription
         return self._subscriptions[data_id]
 
     def add_subscriptions(self, data_ids: Iterable[DataId]) -> None:
@@ -61,6 +65,24 @@ class DataSubscriptionManager:
             self._index_dependencies(self._subscriptions[data_id])
 
         subscription = self._subscriptions.get(update.id)
+        if subscription is not None:
+            # Startup can load an image newer than queued notifications.
+            subscription.latest_revision = max(subscription.latest_revision or revision, revision)
+            self._index_dependencies(subscription)
+            before = self._consistent_revisions
+            advanced = self._try_advance(subscription)
+            if self._consistent_revisions != before:
+                return advanced
+
+        # A mismatch inside one tree can block even a single subscription, or
+        # an update to a different root. Retry that original driver when an
+        # exact dependency version involved in the failed expansion changes.
+        for data_id, dependencies in list(self._pending_cuts.items()):
+            if revision[:2] in dependencies:
+                before = self._consistent_revisions
+                advanced = self._try_advance(self._subscriptions[data_id])
+                if self._consistent_revisions != before:
+                    return advanced
         if subscription is None:
             # Refreshing trees does not itself request a tournament. Wake only
             # recorded conflicts shared by at least two dependent subscriptions,
@@ -80,30 +102,30 @@ class DataSubscriptionManager:
                     # One waiting root may still be blocked by another input.
                     # Allow the next affected root to drive an attempt instead.
             return set()
-        # Startup can load an image newer than queued notifications. Preserve
-        # the root head, but still process historical dependency revisions above.
-        subscription.latest_revision = max(subscription.latest_revision or revision, revision)
-        self._index_dependencies(subscription)
-        return self._try_advance(subscription)
+        return set()
 
     def _try_advance(self, subscription: DataSubscriptionGraph) -> set[DataVersionId]:
         current = {key: sub.current_revision for key, sub in self._subscriptions.items()}
         subscriptions = tuple(self._subscriptions.values())
         self._prepare_proposals(subscriptions)
         updated = subscriptions.index(subscription)
+        self._pending_cuts.pop(subscription.data_id, None)
         try:
             if current != self._consistent_revisions:
                 # Without a validated existing cut there is no stable set to reuse.
                 accepted = self._stabilize(subscriptions, [], list(range(len(subscriptions))), updated)
             else:
                 accepted = self._advance_cut(subscriptions, updated)
+            if not accepted:
+                return set()
+            self._commit_proposals(subscriptions)
+        except InconsistentDependencyError as error:
+            self._pending_cuts[subscription.data_id] = error.dependencies
+            return set()
         except NoConsistentCutError:
             # No forward cut is available. Missing/malformed metadata remains
             # an error and must not be mistaken for a blocked update.
             return set()
-        if not accepted:
-            return set()
-        self._commit_proposals(subscriptions)
         return {
             sub.current_revision[:2]
             for key, sub in self._subscriptions.items()
@@ -174,8 +196,17 @@ class DataSubscriptionManager:
         """Downgrade proposals from latest, then commit the complete cut."""
         subscriptions = tuple(self._subscriptions.values())
         self._prepare_proposals(subscriptions)
-        self._stabilize(subscriptions, [], list(range(len(subscriptions))))
-        self._commit_proposals(subscriptions)
+        try:
+            self._stabilize(subscriptions, [], list(range(len(subscriptions))))
+            self._commit_proposals(subscriptions)
+        except InconsistentDependencyError as error:
+            for sub in subscriptions:
+                if sub.current_revision != sub.latest_revision:
+                    self._pending_cuts[sub.data_id] = error.dependencies
+            if not self.is_initialized:
+                raise NoConsistentCutError("Dependency revisions have not converged") from error
+            # Keep the already delivered selections until a complete cut can
+            # be accepted. No partial proposal has been committed.
         self.cleanup_conflicts()
         return {sub.current_revision[:2] for sub in subscriptions}
 
@@ -216,6 +247,7 @@ class DataSubscriptionManager:
                 self._index_dependencies(sub)
         self._consistent_revisions = {sub.data_id: sub.current_revision for sub in subscriptions}
         self._dirty_subscriptions.clear()
+        self._pending_cuts.clear()
 
     def _rejected(self, subscriptions: tuple[DataSubscriptionGraph, ...], updated: int | None) -> bool:
         if updated is None:
