@@ -533,6 +533,112 @@ class HgraphAdaptorTests(unittest.TestCase):
         self.assertEqual(self.transport.sent[0].dependencies, ())
         self.assertEqual(self.transport.sent[0].weak_dependencies, ())
 
+    def test_strong_self_dependency_is_rejected_before_persistence(self):
+        seed(self.cache, "source", version=101)
+        before = list(self.cache.writes)
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(subscribe[Prices]("source"), "source")
+
+        with self.assertRaisesRegex(Exception, "strong self-dependency"):
+            self.run_graph(app)
+        self.assertEqual(self.cache.writes, before)
+        self.assertEqual(self.transport.sent, [])
+        self.assertEqual((self.transport.starts, self.transport.stops), (1, 1))
+
+    def test_dynamic_publication_id_cannot_become_a_strong_dependency(self):
+        seed(self.cache, "source", version=101)
+        sender = []
+        before_rejection = []
+
+        @hg.push_queue(hg.TS[str])
+        def target_id(send):
+            sender.append(send)
+            send("output")
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(subscribe[Prices]("source"), target_id())
+
+        def change_id(transport):
+            if transport.sent and not before_rejection:
+                before_rejection.extend(self.cache.writes)
+                sender[0]("source")
+
+        self.transport.on_poll = change_id
+        with self.assertRaisesRegex(Exception, "strong self-dependency"):
+            self.run_graph(app)
+        self.assertTrue(before_rejection)
+        self.assertEqual(self.cache.writes, before_rejection)
+        self.assertEqual([u.id for u in self.transport.sent], ["output"])
+        self.assertEqual((self.transport.starts, self.transport.stops), (1, 1))
+
+    def test_dynamic_subscription_id_cannot_become_the_publication_id(self):
+        seed(self.cache, "source", version=101)
+        sender = []
+        before_rejection = []
+
+        @hg.push_queue(hg.TS[str])
+        def source_id(send):
+            sender.append(send)
+            send("source")
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            publish(subscribe[Prices](source_id()), "output")
+
+        def change_id(transport):
+            if transport.sent and not before_rejection:
+                before_rejection.extend(self.cache.writes)
+                sender[0]("output")
+
+        self.transport.on_poll = change_id
+        with self.assertRaisesRegex(Exception, "strong self-dependency"):
+            self.run_graph(app)
+        self.assertTrue(before_rejection)
+        self.assertEqual(self.cache.writes, before_rejection)
+        self.assertEqual([u.id for u in self.transport.sent], ["output"])
+
+    def test_automatic_dependencies_reject_other_service_paths(self):
+        for passive in (False, True):
+            with self.subTest(passive=passive):
+                other_cache, other_transport = MemoryDataCache(), LoopbackTransport()
+                seed(other_cache, "source")
+
+                @hg.compute_node(active=("trigger",) if passive else ("trigger", "df"))
+                def sample(trigger: hg.TS[int], df: hg.TS[hg.Frame[Prices]]) -> hg.TS[hg.Frame[Prices]]:
+                    return df.value
+
+                @hg.graph
+                def app():
+                    hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport)
+                    hg.register_service("other", fabric_service, cache=other_cache, transport=other_transport)
+                    publish(sample(1, subscribe[Prices]("source", path="other")), "output")
+
+                with self.assertRaisesRegex(Exception, "across service paths; provide explicit dependencies"):
+                    self.run_graph(app)
+                self.assertEqual((self.transport.starts, other_transport.starts), (0, 0))
+                self.assertEqual(self.cache.writes, [])
+
+    def test_explicit_dependencies_allow_cross_service_transfer(self):
+        other_cache, other_transport = MemoryDataCache(), LoopbackTransport()
+        seed(other_cache, "source", value=7)
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            hg.register_service("other", fabric_service, cache=other_cache, transport=other_transport, poll_interval=.001)
+            publish(subscribe[Prices]("source", path="other"), "output", dependencies=())
+
+        self.run_graph(app)
+        self.assertEqual(len(self.transport.sent), 1)
+        self.assertEqual(self.transport.sent[0].dependencies, ())
+        self.assertEqual(self.cache.get_version(self.cache.latest("output")[:2]).to_pydict(), {"price": [7]})
+
     def test_automatic_weak_versions_do_not_trigger_publication_but_are_sampled_on_next_tick(self):
         seed(self.cache, "active", version=100)
         seed(self.cache, "passive", version=100)

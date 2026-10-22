@@ -426,6 +426,12 @@ updates do not trigger publication. Explicit `weak_dependencies` can supplement
 automatic discovery and retain their existing revision-triggering behavior.
 Supplying `dependencies` explicitly disables discovery.
 
+Automatic discovery requires subscriptions and publications to use the same
+service path, since separate services can have separate caches. For a transfer
+between services, declare the dependencies explicitly. A publication cannot
+strongly depend on its own dataset ID; this is checked before queueing storage
+work, including when an ID changes at runtime.
+
 Inspection supports inline graphs, native and Python nodes, structural inputs,
 and bound delayed inputs. Crossing a compiled graph boundary or an unresolved
 input raises a wiring error asking for explicit dependencies. Runtime calls to

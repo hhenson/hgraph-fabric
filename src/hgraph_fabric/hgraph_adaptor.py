@@ -97,6 +97,9 @@ def publish(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
         strong, weak = [], []
         for source_index, is_passive in found:
             _, source_id, source_path = subscriptions[source_index]
+            if source_path != path:
+                raise ValueError("Cannot infer fabric dependencies across service paths; "
+                                 "provide explicit dependencies and weak_dependencies")
             (weak if is_passive else strong).append(version_id(source_id, path=source_path))
         dependencies = _unique_dependencies(inputs(strong))
         weak_dependencies = _automatic_weak_dependencies(
@@ -235,6 +238,11 @@ def _requests(data_ids: TSS[str], version_ids: TSS[str],
         for key, value in publications.modified_items():
             if not value.all_valid:
                 continue
+            # IDs can change at runtime. Reject a strong self-dependency before
+            # queueing any storage work: a tree cannot contain two versions of
+            # the same dataset. Weak dependencies do not enter that tree.
+            if any(data_id == value.id.value for data_id, _ in value.dependencies.value):
+                raise ValueError(f"Cannot publish {value.id.value!r} with a strong self-dependency")
             # Request snapshots can re-tick the retained frame. Its original
             # tick time identifies new data without comparing table contents.
             identity = value.id.value, value.data_time.value
