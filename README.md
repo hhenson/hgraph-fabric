@@ -164,7 +164,7 @@ and semantics. A later port to Rust or C++ remains an open decision. Integration
 with hgraph will follow once the standalone components are established.
 
 The initial implementation milestone is a working Python core with in-memory
-storage. Durable storage adapters and hgraph integration come later.
+storage. Durable storage adapters come later.
 Individual components and their APIs will be agreed as we build them.
 
 ## Sessions
@@ -340,3 +340,78 @@ the implementation, and add behavioural tests with each component.
 
 MIT, using hgraph's existing licence and copyright notice:
 Copyright (c) 2023 Howard Henson. See [LICENSE](LICENSE).
+
+## hgraph adaptor
+
+Install `hgraph-fabric[hgraph]` and import `hgraph_fabric.hgraph_adaptor`.
+The adaptor targets hgraph 0.8.35's native runtime. Its schema-typed Arrow table
+is named `Frame[Schema]` (the equivalent of `DataFrame[Schema]`). The fabric core
+still imports and runs without hgraph installed.
+
+```python
+from dataclasses import dataclass
+from hgraph import CompoundScalar, graph, register_service
+from hgraph_fabric.data_cache import DataCache
+from hgraph_fabric.data_fabric_session import DataFabricTransport
+from hgraph_fabric.hgraph_adaptor import (
+    fabric_service, subscribe, version_id, publish,
+)
+
+@dataclass(frozen=True)
+class Prices(CompoundScalar):
+    price: int
+
+@graph
+def copy_prices():
+    prices = subscribe[Prices]("prices")
+    publish(prices, "prices_copy", dependencies=(version_id("prices"),))
+
+@graph
+def app(cache: DataCache, transport: DataFabricTransport):
+    register_service("fabric", fabric_service, cache=cache, transport=transport)
+    copy_prices()
+```
+
+One `@service_impl` serves two subscription interfaces (tables and versions)
+and one request-reply interface (publication). The publication interface takes
+`TS[Frame]` with typed ID, dependency and original frame-tick-time inputs.
+Typed client wrappers convert
+frames and dependency lists at the boundary, so different schemas and TSL sizes
+share the same implementation and consistent cut. The service uses a push source
+to bring worker results into the graph. Cache access, publication, transport
+polling and subscription management all run on one worker thread. Graph requests
+are queued without waiting for storage or broker IO. Worker failures propagate
+through the push source; shutdown joins the worker and closes the transport.
+
+`subscribe[Schema](id) -> TS[Frame[Schema]]` and
+`version_id(id) -> TS[VersionId]` accept `TS[str]` or constant IDs.
+`VersionId` is `tuple[str, int]`. Clients can live in inline or mapped components;
+subscription membership follows the union of table and version requests.
+Changing membership rebuilds the core subscription selection while keeping
+transport reception active. IDs must exist in storage when requested.
+Row schemas are checked using hgraph's `schema_from_frame` field-type mapping.
+
+`publish(df, id, dependencies, weak_dependencies=()) -> TS[VersionId]` sends a
+request and replies with the persisted version. That acknowledgement does not
+mean the version has entered the consistent cut: consumers must subscribe to its
+ID for selected data. Both dependency arguments accept a
+`TSL[TS[VersionId], SIZE]` or a sequence of version ports, with independent sizes.
+Pass `()` explicitly for a source dataset's strong dependencies. All elements
+must be valid before publication; a pending table is retained until they are.
+A fresh table tick or changed ID publishes a new version; a dependency-only tick
+revises the latest version's dependencies. The cache suppresses revisions that
+change only `as_of`. Publications use graph time as their revision timestamp.
+
+All clients accept `path="fabric"`. Register separate paths for independent
+sessions. Reception starts before loading the initial image. Each cut change
+returns matching tables and versions through one push event. Run the graph in
+real-time mode. The optional registration parameter `poll_interval=0.05` bounds
+the worker's broker wait in seconds, allowing it to service queued requests and
+shutdown; it does not schedule polling on the graph thread. Transport polling
+must honor that timeout, and storage operations must complete for shutdown to
+finish. The worker drains accepted requests before stopping.
+
+Automatic dependency inference is deferred. The existing native fabric adaptor
+finds subscription sources by walking upstream wiring, including nested graphs,
+and carries hidden version signals. This adaptor keeps explicit dependency lists
+until that lineage mechanism is added.
