@@ -2,6 +2,7 @@
 from dataclasses import replace
 import os
 import unittest
+from time import monotonic, sleep
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -101,6 +102,18 @@ class KafkaBrokerTests(BrokerContract, unittest.TestCase):
             [NewTopic(self.topic, num_partitions=1, replication_factor=1)], request_timeout=30,
         )[self.topic].result(35)
         self.addCleanup(lambda: self.admin.delete_topics([self.topic])[self.topic].result(15))
+        # Controller acknowledgement can precede metadata propagation and
+        # leader election. Start the transport only once its topic is usable.
+        deadline = monotonic() + 30
+        while monotonic() < deadline:
+            topic = self.admin.list_topics(topic=self.topic, timeout=1).topics.get(self.topic)
+            if (topic is not None and topic.error is None and topic.partitions
+                    and all(partition.error is None and partition.leader >= 0
+                            for partition in topic.partitions.values())):
+                break
+            sleep(.05)
+        else:
+            self.fail("Kafka test topic did not become ready within 30 seconds")
 
     def make_transport(self):
         return KafkaDataFabricTransport(self.servers, self.topic)
