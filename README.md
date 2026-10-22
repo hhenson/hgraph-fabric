@@ -364,7 +364,7 @@ class Prices(CompoundScalar):
 @graph
 def copy_prices():
     prices = subscribe[Prices]("prices")
-    publish(prices, "prices_copy", dependencies=(version_id("prices"),))
+    publish(prices, "prices_copy")
 
 @graph
 def app(cache: DataCache, transport: DataFabricTransport):
@@ -391,7 +391,7 @@ Changing membership rebuilds the core subscription selection while keeping
 transport reception active. IDs must exist in storage when requested.
 Row schemas are checked using hgraph's `schema_from_frame` field-type mapping.
 
-`publish(df, id, dependencies, weak_dependencies=()) -> TS[VersionId]` sends a
+`publish(df, id, dependencies=None, weak_dependencies=()) -> TS[VersionId]` sends a
 request and replies with the persisted version. That acknowledgement does not
 mean the version has entered the consistent cut: consumers must subscribe to its
 ID for selected data. Both dependency arguments accept a
@@ -411,7 +411,34 @@ shutdown; it does not schedule polling on the graph thread. Transport polling
 must honor that timeout, and storage operations must complete for shutdown to
 finish. The worker drains accepted requests before stopping.
 
-Automatic dependency inference is deferred. The existing native fabric adaptor
-finds subscription sources by walking upstream wiring, including nested graphs,
-and carries hidden version signals. This adaptor keeps explicit dependency lists
-until that lineage mechanism is added.
+Omit `dependencies` to infer them from fabric subscriptions upstream of `df`,
+including direct `version_id(...)` subscriptions used to compute the frame.
+Discovery stops at each subscription; it does not flatten that dataset's stored
+dependency tree. A path containing a declared passive input (including
+`@compute_node(active=...)` or `passive(...)`) produces a weak dependency.
+If any fully active path reaches the same subscription, it is strong. Repeated
+version IDs are deduplicated, and an ID present in the strong set is removed
+from the weak set, including when dynamic subscription IDs converge.
+
+Hidden strong version signals can publish dependency-only revisions even when
+the frame computation suppresses its output. Hidden weak version signals wait
+until initially valid and are then sampled on publication inputs; weak-only
+updates do not trigger publication. Explicit `weak_dependencies` can supplement
+automatic discovery and retain their existing revision-triggering behavior.
+Supplying `dependencies` explicitly disables discovery.
+
+Automatic discovery requires subscriptions and publications to use the same
+service path, since separate services can have separate caches. For a transfer
+between services, declare the dependencies explicitly. A publication cannot
+strongly depend on its own dataset ID; this is checked before queueing storage
+work, including when an ID changes at runtime.
+
+Inspection supports inline graphs, native and Python nodes, structural inputs,
+and bound delayed inputs. Crossing a compiled graph boundary or an unresolved
+input raises a wiring error asking for explicit dependencies. Runtime calls to
+`make_active()` or `make_passive()` in user code cannot be inferred at wiring time.
+
+The `hgraph` extra currently pins the upstream wiring-inspection commit from
+[hgraph PR #1783](https://github.com/hhenson/hgraph/pull/1783). Installation builds
+hgraph from source until this API is included in a released wheel; the pin can
+then be replaced with that release requirement.

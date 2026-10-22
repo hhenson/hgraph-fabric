@@ -10,7 +10,7 @@ from hgraph import (
     AUTO_RESOLVE, COMPOUND_SCALAR, SIZE, SCHEMA, STATE, TS, TSB, TSD, TSL, TSS,
     REMOVE, EvaluationEngineApi, Frame, Size, TimeSeriesSchema, compute_node,
     const, convert, graph, impl_input, impl_output, last_modified_time, push_queue, request_reply_service,
-    service_impl, sink_node, subscription_service,
+    service_impl, sink_node, subscription_service, inspect_wiring_dependencies, wiring_extension_state,
 )
 from hgraph._frame import as_arrow_table
 from hgraph.adaptors.data_frame import schema_from_frame
@@ -31,9 +31,7 @@ def _subscribe(id: TS[str], path: str = "fabric") -> TS[Frame]: ...
 
 
 @subscription_service
-def version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]:
-    """Subscribe to the version selected by the shared consistent cut."""
-    ...
+def _version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]: ...
 
 
 @request_reply_service
@@ -47,7 +45,17 @@ def _publish(df: TS[Frame], id: TS[str],
 def subscribe(id: TS[str], schema: type[COMPOUND_SCALAR] = AUTO_RESOLVE,
               path: str = "fabric") -> TS[Frame[COMPOUND_SCALAR]]:
     """Subscribe to a dataset through the registered fabric service."""
-    return _typed_frame[COMPOUND_SCALAR: schema](_subscribe(id, path=path))
+    frame = _typed_frame[COMPOUND_SCALAR: schema](_subscribe(id, path=path))
+    wiring_extension_state("hgraph_fabric.subscriptions", list).append((frame, id, path))
+    return frame
+
+
+@graph
+def version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]:
+    """Subscribe to the version selected by the shared consistent cut."""
+    version = _version_id(id, path=path)
+    wiring_extension_state("hgraph_fabric.subscriptions", list).append((version, id, path))
+    return version
 
 
 @compute_node
@@ -68,11 +76,14 @@ class _Publication:
 
 
 def publish(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
-            dependencies: TSL[TS[VersionId], SIZE],
+            dependencies: TSL[TS[VersionId], SIZE] = None,
             weak_dependencies: TSL[TS[VersionId], WEAK_SIZE] = (),
             path: str = "fabric") -> TS[VersionId]:
     """Request publication; reply with the persisted version, not subscribed data.
 
+    Omitted dependencies are inferred from upstream fabric subscriptions. A
+    passive input anywhere on a path makes it weak unless an active path exists.
+    Pass dependencies=() to explicitly declare no strong dependencies.
     A table/ID tick creates a version; dependency-only ticks revise its metadata.
     Consumers must subscribe to receive data selected by the consistent cut.
     """
@@ -82,8 +93,45 @@ def publish(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
                 return const((), tp=TS[tuple[VersionId, ...]])
             value = TSL.from_ts(*value, tp=TS[VersionId])
         return _dependency_ids(value)
-    return _publish(df, id, inputs(dependencies), inputs(weak_dependencies),
-                    last_modified_time(df), path=path)
+    if dependencies is None:
+        subscriptions = wiring_extension_state("hgraph_fabric.subscriptions", list)
+        try:
+            found = inspect_wiring_dependencies(df, tuple(item[0] for item in subscriptions))
+        except ValueError as error:
+            raise ValueError("Cannot infer fabric dependencies across this wiring boundary; "
+                             "provide explicit dependencies and weak_dependencies") from error
+        strong, weak = [], []
+        for source_index, is_passive in found:
+            _, source_id, source_path = subscriptions[source_index]
+            if source_path != path:
+                raise ValueError("Cannot infer fabric dependencies across service paths; "
+                                 "provide explicit dependencies and weak_dependencies")
+            (weak if is_passive else strong).append(_version_id(source_id, path=source_path))
+        dependencies = _unique_dependencies(inputs(strong))
+        weak_dependencies = _automatic_weak_dependencies(
+            df, id, dependencies, inputs(weak), inputs(weak_dependencies))
+    else:
+        dependencies, weak_dependencies = inputs(dependencies), inputs(weak_dependencies)
+    return _publish(df, id, dependencies, weak_dependencies, last_modified_time(df), path=path)
+
+
+@compute_node
+def _unique_dependencies(value: TS[tuple[VersionId, ...]]) -> TS[tuple[VersionId, ...]]:
+    return tuple(dict.fromkeys(value.value))
+
+
+@compute_node
+def _automatic_weak_dependencies(df: TS[Frame], id: TS[str],
+                                 strong: TS[tuple[VersionId, ...]],
+                                 inferred: TS[tuple[VersionId, ...]],
+                                 explicit: TS[tuple[VersionId, ...]]) -> TS[tuple[VersionId, ...]]:
+    # Wait for the initial versions, then sample inferred weak versions only
+    # when a publication input changes. Explicit weak inputs retain their
+    # existing dependency-only publication behavior.
+    inferred.make_passive()
+    strong_ids = {data_id for data_id, _ in strong.value}
+    return tuple(value for value in dict.fromkeys((*inferred.value, *explicit.value))
+                 if value[0] not in strong_ids)
 
 
 @graph
@@ -196,6 +244,11 @@ def _requests(data_ids: TSS[str], version_ids: TSS[str],
         for key, value in publications.modified_items():
             if not value.all_valid:
                 continue
+            # IDs can change at runtime. Reject a strong self-dependency before
+            # queueing any storage work: a tree cannot contain two versions of
+            # the same dataset. Weak dependencies do not enter that tree.
+            if any(data_id == value.id.value for data_id, _ in value.dependencies.value):
+                raise ValueError(f"Cannot publish {value.id.value!r} with a strong self-dependency")
             # Request snapshots can re-tick the retained frame. Its original
             # tick time identifies new data without comparing table contents.
             identity = value.id.value, value.data_time.value
@@ -211,7 +264,7 @@ def _requests(data_ids: TSS[str], version_ids: TSS[str],
     worker.commands.put((keys, tuple(requests), retired))
 
 
-@service_impl(interfaces=(_subscribe, version_id, _publish))
+@service_impl(interfaces=(_subscribe, _version_id, _publish))
 def fabric_service(path: str, cache: DataCache, transport: DataFabricTransport,
                    poll_interval: float = 0.05):
     """Register with register_service(path, fabric_service, cache=..., transport=...).
@@ -224,8 +277,8 @@ def fabric_service(path: str, cache: DataCache, transport: DataFabricTransport,
         raise ValueError("Poll interval must be finite and positive")
     worker = _Worker(cache, transport, poll_interval)
     output = _responses(_session_events(worker))
-    _requests(impl_input(_subscribe, path), impl_input(version_id, path),
+    _requests(impl_input(_subscribe, path), impl_input(_version_id, path),
               impl_input(_publish, path), worker)
     impl_output(_subscribe, output.data, path)
-    impl_output(version_id, output.versions, path)
+    impl_output(_version_id, output.versions, path)
     impl_output(_publish, output.replies, path)

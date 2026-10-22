@@ -18,7 +18,7 @@ classifiers = [
 ]
 
 [project.optional-dependencies]
-hgraph = ["hgraph>=0.8.35,<0.9"]
+hgraph = ["hgraph @ git+https://github.com/hhenson/hgraph.git@4a2009b58b1c43a580a2f0cdb59008c4cee220b1"]
 kafka = ["confluent-kafka>=2.6,<3"]
 nats = ["nats-py>=2.9,<3"]
 
