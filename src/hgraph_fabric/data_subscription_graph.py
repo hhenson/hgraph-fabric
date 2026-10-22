@@ -63,7 +63,7 @@ class DataSubscriptionGraph:
         version_id = revision_id[:2]
         invalidated = {
             root for root, dependencies in self._dependency_revisions.items()
-            if version_id in dependencies and dependencies[version_id] != revision_id
+            if version_id in dependencies and dependencies[version_id] < revision_id
         }
         for root in invalidated:
             self._revision_graphs.pop(root, None)

@@ -342,3 +342,41 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         self.transport.poll.side_effect = OSError("Poll failed")
         with self.assertRaises(OSError):
             self.session.poll(0)
+
+    def test_dependency_publication_sends_only_changed_revisions(self):
+        data, initial = publish(self.session, "a", 100)
+        self.transport.send.reset_mock()
+        self.cache.writes.clear()
+        returned, unchanged = self.session.publish(id="a", as_of=AS_OF)
+        self.assertIs(returned, data)
+        self.assertEqual(unchanged, initial)
+        self.transport.send.assert_not_called()
+        self.assertEqual(self.cache.writes, [])
+        returned, update = self.session.publish(id="a", weak_dependencies=(("reference", 1),), as_of=AS_OF)
+        self.assertIs(returned, data)
+        self.assertEqual(update.revision, (100, 1))
+        self.transport.send.assert_called_once_with(update)
+        self.transport.send.reset_mock()
+        self.session.publish(id="a", weak_dependencies=(("reference", 1),))
+        self.transport.send.assert_not_called()
+
+    def test_failed_dependency_publication_does_not_send(self):
+        publish(self.session, "a", 100)
+        self.transport.send.reset_mock()
+        with patch.object(self.cache, "write_revision", side_effect=OSError("Storage unavailable")):
+            with self.assertRaises(OSError):
+                self.session.publish(id="a", weak_dependencies=(("reference", 1),))
+        self.transport.send.assert_not_called()
+
+    def test_dependency_revision_refreshes_subscription_without_new_table_delta(self):
+        publisher = DataFabricSession(self.cache)
+        publish(publisher, "source", 1)
+        publish(publisher, "source", 2)
+        data, _ = publish(publisher, "a", 100, (("source", 1),))
+        sub = self.session.add_subscription("a")
+        self.assertIs(self.session.poll(0)["a"], data)
+        _, update = self.session.publish(id="a", dependencies=(("source", 2),))
+        self.transport.poll.return_value = update
+        self.assertEqual(self.session.poll(0), {})
+        self.assertEqual(sub.current_revision, ("a", 100, 1))
+        self.assertEqual(sub.current(self.cache).get_data_version_id("source"), ("source", 2))

@@ -22,6 +22,8 @@ class DataCache(ABC):
         self._data: dict[DataVersionId, Table] = {}
         self._revisions: dict[DataRevisionId, DataRevisionDetails] = {}
         self._latest_revisions: dict[DataVersionId, DataRevisionId] = {}
+        self._pending_revision_heads: dict[DataVersionId, DataRevisionId] = {}
+        self._pending_latest_heads: dict[DataId, DataRevisionId] = {}
 
     def cached_ids(self) -> set[DataId]:
         """Return IDs with any cached data or metadata, without loading."""
@@ -48,7 +50,10 @@ class DataCache(ABC):
 
     def latest(self, data_id: DataId) -> DataRevisionId:
         if data_id not in self._latest:
-            self._latest[data_id] = self.load_latest(data_id)
+            stored = self.load_latest(data_id)
+            latest = max(stored, self._pending_latest_heads.pop(data_id, stored))
+            self._latest[data_id] = latest
+            self._pending_revision_heads.pop(latest[:2], None)
         return self._latest[data_id]
 
     def get_version(self, version_id: DataVersionId) -> Table:
@@ -63,20 +68,28 @@ class DataCache(ABC):
 
     def write(
         self,
-        data: Table,
+        data: Table | None = None,
         id: DataId | None = None,
         dependencies: tuple[DataVersionId, ...] = (),
         weak_dependencies: tuple[DataVersionId, ...] = (),
         as_of: datetime | None = None,
     ) -> tuple[Table, DataUpdateDetails]:
-        """Write a new data version and return its table and update notification.
+        """Write a version, or revise dependencies when no table is supplied.
 
         Explicit id/as_of override schema metadata. Missing as_of uses UTC now;
         missing version uses as_of in epoch milliseconds (naive times mean UTC).
         Advance any version not past latest to latest + 1, keeping as_of intact.
         Other metadata and the input table are preserved. Callers deliver the
         returned update to their associated subscription managers.
+
+        Without a table, id is required and only the latest version's dependency
+        metadata is revised. Unchanged dependencies return the existing table
+        and update details, preserving as_of and performing no writes.
         """
+        if data is None:
+            if id is None:
+                raise ValueError("Data ID is required when updating dependencies")
+            return self.write_dependencies(id, dependencies, weak_dependencies, as_of)
         metadata = dict(data.schema.metadata or {})
         if id is None:
             if b"id" not in metadata:
@@ -121,7 +134,43 @@ class DataCache(ABC):
             as_of=as_of,
         )
         self._data[(id, version)] = data
+        self._latest[id] = revision_id  # This write has just established the stored head.
         self.apply_update(update)
+        return data, update
+
+    def write_dependencies(
+        self,
+        id: DataId,
+        dependencies: tuple[DataVersionId, ...] = (),
+        weak_dependencies: tuple[DataVersionId, ...] = (),
+        as_of: datetime | None = None,
+    ) -> tuple[Table, DataUpdateDetails]:
+        """Revise the latest version's dependencies without rewriting its table.
+
+        An as_of-only change is a no-op. The returned table keeps the metadata
+        from its version publication; the revision timestamp is in the update.
+        """
+        previous = self.latest(id)
+        details = self.get_revision(previous)
+        data = self.get_version(previous[:2])
+        changed = (dependencies != details.dependencies
+                   or weak_dependencies != details.weak_dependencies)
+        revision_id = previous
+        if changed:
+            revision_id = (id, previous[1], previous[2] + 1)
+            details = DataRevisionDetails(
+                dependencies=dependencies, weak_dependencies=weak_dependencies,
+                previous_revision=None, as_of=as_of if as_of is not None else datetime.now(UTC),
+            )
+            self.write_revision(revision_id, details)
+            self.write_latest(id, LatestDataDetails(revision_id[1:]))
+        update = DataUpdateDetails(
+            id=id, revision=revision_id[1:], previous_revision=details.previous_revision,
+            dependencies=details.dependencies, weak_dependencies=details.weak_dependencies,
+            as_of=details.as_of,
+        )
+        if changed:
+            self.apply_update(update)
         return data, update
 
     def get_latest_revision(self, version_id: DataVersionId) -> DataRevisionId:
@@ -130,6 +179,7 @@ class DataCache(ABC):
             for revision_id in self.version_history(version_id[0]):
                 if revision_id[:2] == version_id:
                     self._latest_revisions[version_id] = revision_id
+                    self._pending_revision_heads.pop(version_id, None)
                     break
             else:
                 raise KeyError(version_id)
@@ -148,6 +198,14 @@ class DataCache(ABC):
         while revision_id is not None:
             if revision_id[0] != data_id:
                 raise ValueError("Version history points to a different data ID")
+            # A stored link captures a count at publication time. Include later
+            # notifications, whether still pending or already resolved by lookup.
+            version_id = revision_id[:2]
+            revision_id = max(
+                revision_id,
+                self._pending_revision_heads.get(version_id, revision_id),
+                self._latest_revisions.get(version_id, revision_id),
+            )
             yield revision_id
             # Only revision zero carries the link to the previous sparse
             # version and its maximum count. Never subtract from a version ID.
@@ -167,8 +225,15 @@ class DataCache(ABC):
         revision_id = (update.id, *update.revision)
         # Local writes may already be ahead of their notifications. An older
         # echo must not lower the head used to allocate the next version.
-        latest = max(self._latest.get(update.id, revision_id), revision_id)
-        self._latest[update.id] = latest
+        latest = self._latest.get(update.id)
+        if latest is not None:
+            latest = self._latest[update.id] = max(latest, revision_id)
+        else:
+            # Reception starts without replay: a first notification can concern
+            # an older version than the head already present in shared storage.
+            self._pending_latest_heads[update.id] = max(
+                self._pending_latest_heads.get(update.id, revision_id), revision_id,
+            )
         self._revisions[revision_id] = DataRevisionDetails(
             dependencies=update.dependencies,
             weak_dependencies=update.weak_dependencies,
@@ -176,6 +241,13 @@ class DataCache(ABC):
             as_of=update.as_of,
         )
         version_id = revision_id[:2]
+        if latest is None or (latest[:2] != version_id and version_id not in self._latest_revisions):
+            # A notification is a lower bound until history is loaded: it may
+            # lag the stored count or advance beyond the count in the link.
+            self._pending_revision_heads[version_id] = max(
+                self._pending_revision_heads.get(version_id, revision_id), revision_id,
+            )
+            return
         version_latest = latest if latest[:2] == version_id else revision_id
         self._latest_revisions[version_id] = max(
             self._latest_revisions.get(version_id, revision_id), version_latest,
