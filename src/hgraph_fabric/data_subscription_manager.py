@@ -112,11 +112,25 @@ class DataSubscriptionManager:
 
     def _index_dependencies(self, sub: DataSubscriptionGraph) -> None:
         dependencies = set()
-        for revision in {sub.current_revision, sub.latest_revision} - {None}:
-            dependencies.update(
-                node for node in sub.revision(revision, self._cache).nodes()
-                if node[0] != sub.data_id
-            )
+        pending = list({sub.current_revision, sub.latest_revision} - {None})
+        visited = set()
+        while pending:
+            revision = pending.pop()
+            if revision in visited:
+                continue
+            visited.add(revision)
+            # Sibling dependency revisions arrive separately. The index must
+            # watch every reachable version, even during a temporary mismatch;
+            # constructing a selectable tree belongs to cut resolution.
+            required_versions = {revision[0]: revision[1]}
+            for version in self._cache.get_revision(revision).dependencies or ():
+                # One record itself must still be well formed. Only different
+                # records may temporarily require different versions.
+                if required_versions.setdefault(version[0], version[1]) != version[1]:
+                    raise ValueError(f"Conflicting version for data ID {version[0]!r}")
+                if version[0] != sub.data_id:
+                    dependencies.add(version)
+                pending.append(self._cache.get_latest_revision(version))
         previous = self._subscription_dependencies.get(sub.data_id, set())
         for version in previous - dependencies:
             self._dependents[version].remove(sub.data_id)
