@@ -130,7 +130,7 @@ the prefix reachable from the cached latest and headers, stopping at the first
 missing link without loading. Missing storage records raise in the loading form;
 malformed history links raise in either form.
 
-`cache.write(data, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
+`cache.write(data=None, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
 accepts an Arrow table and returns `(written_table, DataUpdateDetails)`. Explicit
 `id` and `as_of` override schema metadata. An ID must be supplied in one of those
 places; missing `as_of` defaults to UTC now. The schema stores UTF-8 `id`, decimal
@@ -147,6 +147,17 @@ Storage subclasses implement `write_version(DataVersionId, Table)`,
 raises `KeyError` for a new ID. After successful persistence, the cache retains
 the table and metadata; deliver the returned update to every associated manager
 as part of the coordinated write/notification operation. Storage errors propagate.
+
+Omit the table to update dependencies on the latest version:
+`cache.write(id="prices", dependencies=(("source", 7),))`, or call
+`cache.write_dependencies("prices", dependencies=(("source", 7),))` directly.
+Supply the complete strong and weak dependency tuples; omitted tuples are empty.
+Changed dependencies increment the revision count and persist only revision and
+latest metadata. Unchanged tuples return the existing `(Table, DataUpdateDetails)`
+without writes, even when `as_of` differs. The table retains its original version
+metadata; the new revision's `as_of` is recorded in the update details. An unknown
+ID raises `KeyError`. Supplying a table always creates a new version, without a
+table equality check.
 
 We will build the components incrementally in Python to establish the structure
 and semantics. A later port to Rust or C++ remains an open decision. Integration
@@ -165,7 +176,7 @@ publication API. Register roots with `add_subscription` or `add_subscriptions`.
 data versions advanced. Tables are loaded through the cache after selection.
 Blocked updates and revision-count-only changes return an empty mapping.
 
-`publish(data, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
+`publish(data=None, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
 returns the cache's `(Table, DataUpdateDetails)` result. The external driver
 delivers that update to each associated session before further cut operations,
 including the publishing session when it has subscriptions.
@@ -173,7 +184,9 @@ including the publishing session when it has subscriptions.
 `PollingDataFabricSession(cache, transport)` adds `start()`, `stop()`, and
 `poll(timeout=None)`. Use `with PollingDataFabricSession(cache, transport) as session:`
 to start on entry and stop on exit, including when the block raises an exception.
-Its `publish` persists first, then sends the update metadata.
+Its `publish` persists first, then sends the update metadata. Dependency-only
+calls with unchanged dependency tuples return existing details without sending.
+This also applies to the threaded helper's publish callable.
 If any registered subscription has no current revision, `poll` first initializes
 and returns the full consistent cut without receiving a message. This also applies
 to subscriptions added after polling has begun; the whole cut is returned because

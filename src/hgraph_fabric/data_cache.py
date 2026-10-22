@@ -68,20 +68,28 @@ class DataCache(ABC):
 
     def write(
         self,
-        data: Table,
+        data: Table | None = None,
         id: DataId | None = None,
         dependencies: tuple[DataVersionId, ...] = (),
         weak_dependencies: tuple[DataVersionId, ...] = (),
         as_of: datetime | None = None,
     ) -> tuple[Table, DataUpdateDetails]:
-        """Write a new data version and return its table and update notification.
+        """Write a version, or revise dependencies when no table is supplied.
 
         Explicit id/as_of override schema metadata. Missing as_of uses UTC now;
         missing version uses as_of in epoch milliseconds (naive times mean UTC).
         Advance any version not past latest to latest + 1, keeping as_of intact.
         Other metadata and the input table are preserved. Callers deliver the
         returned update to their associated subscription managers.
+
+        Without a table, id is required and only the latest version's dependency
+        metadata is revised. Unchanged dependencies return the existing table
+        and update details, preserving as_of and performing no writes.
         """
+        if data is None:
+            if id is None:
+                raise ValueError("Data ID is required when updating dependencies")
+            return self.write_dependencies(id, dependencies, weak_dependencies, as_of)
         metadata = dict(data.schema.metadata or {})
         if id is None:
             if b"id" not in metadata:
@@ -128,6 +136,41 @@ class DataCache(ABC):
         self._data[(id, version)] = data
         self._latest[id] = revision_id  # This write has just established the stored head.
         self.apply_update(update)
+        return data, update
+
+    def write_dependencies(
+        self,
+        id: DataId,
+        dependencies: tuple[DataVersionId, ...] = (),
+        weak_dependencies: tuple[DataVersionId, ...] = (),
+        as_of: datetime | None = None,
+    ) -> tuple[Table, DataUpdateDetails]:
+        """Revise the latest version's dependencies without rewriting its table.
+
+        An as_of-only change is a no-op. The returned table keeps the metadata
+        from its version publication; the revision timestamp is in the update.
+        """
+        previous = self.latest(id)
+        details = self.get_revision(previous)
+        data = self.get_version(previous[:2])
+        changed = (dependencies != details.dependencies
+                   or weak_dependencies != details.weak_dependencies)
+        revision_id = previous
+        if changed:
+            revision_id = (id, previous[1], previous[2] + 1)
+            details = DataRevisionDetails(
+                dependencies=dependencies, weak_dependencies=weak_dependencies,
+                previous_revision=None, as_of=as_of if as_of is not None else datetime.now(UTC),
+            )
+            self.write_revision(revision_id, details)
+            self.write_latest(id, LatestDataDetails(revision_id[1:]))
+        update = DataUpdateDetails(
+            id=id, revision=revision_id[1:], previous_revision=details.previous_revision,
+            dependencies=details.dependencies, weak_dependencies=details.weak_dependencies,
+            as_of=details.as_of,
+        )
+        if changed:
+            self.apply_update(update)
         return data, update
 
     def get_latest_revision(self, version_id: DataVersionId) -> DataRevisionId:

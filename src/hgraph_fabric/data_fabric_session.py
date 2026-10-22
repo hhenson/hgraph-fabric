@@ -42,13 +42,16 @@ class DataFabricSession:
 
     def publish(
         self,
-        data: Table,
+        data: Table | None = None,
         id: DataId | None = None,
         dependencies: tuple[DataVersionId, ...] = (),
         weak_dependencies: tuple[DataVersionId, ...] = (),
         as_of: datetime | None = None,
     ) -> tuple[Table, DataUpdateDetails]:
         """Persist data; the driver delivers the returned update to sessions.
+
+        Omit data to revise the latest version's dependencies. An unchanged
+        dependency publication returns existing details without a new revision.
 
         Deliver to every session sharing this cache before the next cut/read,
         including this session when it has subscriptions.
@@ -144,15 +147,17 @@ class PollingDataFabricSession(DataFabricSession):
 
     def publish(
         self,
-        data: Table,
+        data: Table | None = None,
         id: DataId | None = None,
         dependencies: tuple[DataVersionId, ...] = (),
         weak_dependencies: tuple[DataVersionId, ...] = (),
         as_of: datetime | None = None,
     ) -> tuple[Table, DataUpdateDetails]:
         """Persist before sending; local subscriptions advance through poll()."""
+        previous = self._cache.latest(id) if data is None and id is not None else None
         data, update = super().publish(data, id, dependencies, weak_dependencies, as_of)
-        self._transport.send(update)
+        if previous != (update.id, *update.revision):
+            self._transport.send(update)
         return data, update
 
 
@@ -191,7 +196,7 @@ def run_data_fabric_session(
     session: PollingDataFabricSession
 
     def publish(
-        data: Table,
+        data: Table | None = None,
         id: DataId | None = None,
         dependencies: tuple[DataVersionId, ...] = (),
         weak_dependencies: tuple[DataVersionId, ...] = (),

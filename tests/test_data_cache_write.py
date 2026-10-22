@@ -219,3 +219,81 @@ class DataCacheWriteTests(unittest.TestCase):
         self.assertEqual(manager.apply_update(update), {("prices", 1)})
         self.assertEqual(sub.current_revision, ("prices", 1, 0))
         self.assertIs(cache.get_version(("prices", 1)), written)
+
+    def test_as_of_only_dependency_publications_are_dropped_at_any_revision(self):
+        cache = MemoryDataCache()
+        original_time = datetime(2026, 10, 21, tzinfo=UTC)
+        data, original = cache.write(table({"price": [10]}), id="prices", as_of=original_time)
+        for deps in ((), (("source", 2),)):
+            if deps:
+                data, original = cache.write(id="prices", dependencies=deps, as_of=original_time)
+            cache.writes.clear()
+            for as_of in (None, original_time, original_time + timedelta(days=1)):
+                returned, update = cache.write(id="prices", dependencies=deps, as_of=as_of)
+                self.assertIs(returned, data)
+                self.assertEqual(update, original)
+                self.assertEqual(cache.latest("prices"), ("prices", *original.revision))
+                self.assertEqual(cache.writes, [])
+
+    def test_dependency_changes_increment_only_revision_and_preserve_version_header(self):
+        cache = MemoryDataCache()
+        original_time = datetime(2026, 10, 21, tzinfo=UTC)
+        cache.write(table({"price": [9]}, metadata={b"version": b"10"}), id="prices", as_of=original_time)
+        data, _ = cache.write(table({"price": [10]}, metadata={b"version": b"20"}), id="prices", as_of=original_time)
+        header = cache.get_revision(("prices", 20, 0))
+        cases = [((("source", 1),), ()), ((("source", 1),), (("reference", 2),)),
+                 ((), (("reference", 2),)), ((), ())]
+        for count, (deps, weak) in enumerate(cases, 1):
+            cache.writes.clear()
+            as_of = original_time + timedelta(seconds=count)
+            returned, update = cache.write(id="prices", dependencies=deps, weak_dependencies=weak, as_of=as_of)
+            self.assertIs(returned, data)
+            self.assertEqual(update.revision, (20, count))
+            self.assertIsNone(update.previous_revision)
+            self.assertEqual(update.as_of, as_of)
+            self.assertEqual((update.dependencies, update.weak_dependencies), (deps, weak))
+            self.assertEqual([entry[:2] for entry in cache.writes], [
+                ("revision", ("prices", 20, count)), ("latest", "prices"),
+            ])
+            self.assertEqual(cache.get_latest_revision(("prices", 20)), ("prices", 20, count))
+        self.assertIs(cache.get_revision(("prices", 20, 0)), header)
+        self.assertEqual(data.schema.metadata[b"as_of"], original_time.isoformat().encode())
+        reader = MemoryDataCache()
+        reader.latest_values = cache.latest_values
+        reader.revision_values = cache.revision_values
+        self.assertEqual(list(reader.version_history("prices")), [("prices", 20, 4), ("prices", 10, 0)])
+
+    def test_dependency_revision_defaults_as_of_to_utc_now(self):
+        cache = MemoryDataCache()
+        cache.write(table({"price": [10]}), id="prices")
+        now = datetime(2026, 10, 22, tzinfo=UTC)
+        with patch("hgraph_fabric.data_cache.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+            _, update = cache.write_dependencies("prices", dependencies=(("source", 1),))
+            clock.now.assert_called_once_with(UTC)
+        self.assertEqual(update.as_of, now)
+
+    def test_identical_table_publication_still_creates_new_version(self):
+        cache = MemoryDataCache()
+        data, initial = cache.write(table({"price": [10]}), id="prices")
+        _, update = cache.write(data)
+        self.assertEqual(update.revision, (initial.revision[0] + 1, 0))
+        self.assertEqual(update.previous_revision, initial.revision)
+
+    def test_dependency_publication_requires_existing_id(self):
+        cache = MemoryDataCache()
+        with self.assertRaises(ValueError):
+            cache.write()
+        with self.assertRaises(KeyError):
+            cache.write(id="missing")
+        self.assertEqual(cache.writes, [])
+
+    def test_failed_dependency_persistence_does_not_advance_cached_head(self):
+        for failed in ("write_revision", "write_latest"):
+            with self.subTest(failed=failed):
+                cache = MemoryDataCache()
+                _, initial = cache.write(table({"price": [10]}), id="prices")
+                with patch.object(cache, failed, side_effect=OSError("Storage unavailable")):
+                    with self.assertRaises(OSError):
+                        cache.write(id="prices", dependencies=(("source", 1),))
+                self.assertEqual(cache.latest("prices"), ("prices", *initial.revision))

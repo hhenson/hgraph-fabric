@@ -322,3 +322,33 @@ class ThreadedSessionTests(unittest.TestCase):
                     ):
                         self.fail("Invalid interval must not start a worker")
         self.assertEqual(self.transport.calls, [])
+
+    def test_threaded_dependency_publication_suppresses_as_of_only_updates(self):
+        data, original = self.seed()
+        with run_data_fabric_session(
+            self.cache, self.transport, lambda delta, publish: None, poll_interval=0.001,
+        ) as publish:
+            returned, unchanged = publish(id="a", as_of=AS_OF)
+            self.assertIs(returned, data)
+            self.assertEqual(unchanged, original)
+            returned, changed = publish(id="a", weak_dependencies=(("reference", 1),))
+            self.assertIs(returned, data)
+            self.assertEqual(changed.revision, (original.revision[0], 1))
+            _, unchanged = publish(id="a", weak_dependencies=(("reference", 1),), as_of=AS_OF)
+            self.assertEqual(unchanged, changed)
+        self.assertEqual([name for name, _ in self.transport.calls].count("send"), 1)
+        owner = self.transport.calls[0][1]
+        self.assertTrue(all(thread is owner for _, thread in self.transport.calls))
+
+    def test_initial_callback_can_drop_as_of_only_publication(self):
+        _, initial = self.seed()
+        completed = Event()
+        def callback(delta, publish):
+            _, update = publish(id="a")
+            self.assertEqual(update, initial)
+            completed.set()
+        with run_data_fabric_session(
+            self.cache, self.transport, callback, subscriptions=["a"], poll_interval=0.001,
+        ):
+            self.assertTrue(completed.wait(2))
+        self.assertNotIn("send", [name for name, _ in self.transport.calls])
