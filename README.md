@@ -164,7 +164,7 @@ and semantics. A later port to Rust or C++ remains an open decision. Integration
 with hgraph will follow once the standalone components are established.
 
 The initial implementation milestone is a working Python core with in-memory
-storage. Durable storage adapters and hgraph integration come later.
+storage. Durable storage adapters come later.
 Individual components and their APIs will be agreed as we build them.
 
 ## Sessions
@@ -350,7 +350,7 @@ still imports and runs without hgraph installed.
 
 ```python
 from dataclasses import dataclass
-from hgraph import CompoundScalar, graph
+from hgraph import CompoundScalar, graph, register_service
 from hgraph_fabric.data_cache import DataCache
 from hgraph_fabric.data_fabric_session import DataFabricTransport
 from hgraph_fabric.hgraph_adaptor import (
@@ -368,44 +368,48 @@ def copy_prices():
 
 @graph
 def app(cache: DataCache, transport: DataFabricTransport):
-    with fabric_service(cache, transport):
-        copy_prices()
+    register_service("fabric", fabric_service, cache=cache, transport=transport)
+    copy_prices()
 ```
 
-`fabric_service(cache, transport, poll_interval=timedelta(milliseconds=10))`
-is a wiring scope. All its subscriptions share one session and one consistent
-cut, including subscriptions with different row schemas. Components use
-`subscribe[Schema](id: str) -> TS[Frame[Schema]]` and
-`version_id(id: str) -> TS[VersionId]`, where `VersionId` is `tuple[str, int]`.
-The version signal is emitted with the selected table, so it remains independent
-of Arrow/Polars presentation and schema metadata conversion.
+One `@service_impl` serves two subscription interfaces (tables and versions)
+and one request-reply interface (publication). Typed client wrappers convert
+frames and dependency lists at the boundary, so different schemas and TSL sizes
+share the same implementation and consistent cut. The service uses a push source
+to bring worker results into the graph. Cache access, publication, transport
+polling and subscription management all run on one worker thread. Graph requests
+are queued without waiting for storage or broker IO. Worker failures propagate
+through the push source; shutdown joins the worker and closes the transport.
 
-`publish(df, id, dependencies, weak_dependencies=())` is a sink. `df` is a typed
-frame time series, and `id` is `TS[str]` or a constant string. Both dependency
-arguments accept a `TSL[TS[VersionId], SIZE]` or a sequence of version time-series
-ports. Strong and weak lists can have different sizes. Pass `()` explicitly for
-a source dataset's strong dependencies. All supplied elements must be valid
-before publication. A fresh table tick or changed ID publishes a new version;
-a dependency-only tick revises the latest version's dependencies. The cache
-suppresses revisions that change only `as_of`. A table received while dependencies
-are incomplete is retained and published when they become valid.
+`subscribe[Schema](id) -> TS[Frame[Schema]]` and
+`version_id(id) -> TS[VersionId]` accept `TS[str]` or constant IDs.
+`VersionId` is `tuple[str, int]`. Clients can live in inline or mapped components;
+subscription membership follows the union of table and version requests.
+Changing membership rebuilds the core subscription selection while keeping
+transport reception active. IDs must exist in storage when requested.
+Row schemas are checked using hgraph's `schema_from_frame` field-type mapping.
 
-Consumers of an output dataset should subscribe to its ID. The sink does not
-return published data: subscribers receive it only after notification and cut
-selection. Each changed cut is delivered as one graph update, with matching table
-and version signals. The session starts reception before loading subscriptions,
-polls without blocking on the graph thread, and stops the transport with the
-graph. Publications use graph time as their revision timestamp. Simulation can
-exercise deterministic transports; it is not durable historical replay.
+`publish(df, id, dependencies, weak_dependencies=()) -> TS[VersionId]` sends a
+request and replies with the persisted version. That acknowledgement does not
+mean the version has entered the consistent cut: consumers must subscribe to its
+ID for selected data. Both dependency arguments accept a
+`TSL[TS[VersionId], SIZE]` or a sequence of version ports, with independent sizes.
+Pass `()` explicitly for a source dataset's strong dependencies. All elements
+must be valid before publication; a pending table is retained until they are.
+A fresh table tick or changed ID publishes a new version; a dependency-only tick
+revises the latest version's dependencies. The cache suppresses revisions that
+change only `as_of`. Publications use graph time as their revision timestamp.
 
-Subscription IDs are fixed during static wiring, including ordinary inline
-component graphs. As in the core session, subscribed IDs must already exist in
-storage when the graph starts. Runtime subscription membership and waiting for
-an ID's first publication are not part of this initial adaptor. Subscription
-row schemas are checked using hgraph's `schema_from_frame` field-type mapping.
+All clients accept `path="fabric"`. Register separate paths for independent
+sessions. Reception starts before loading the initial image. Each cut change
+returns matching tables and versions through one push event. Run the graph in
+real-time mode. The optional registration parameter `poll_interval=0.05` bounds
+the worker's broker wait in seconds, allowing it to service queued requests and
+shutdown; it does not schedule polling on the graph thread. Transport polling
+must honor that timeout, and storage operations must complete for shutdown to
+finish. The worker drains accepted requests before stopping.
 
 Automatic dependency inference is deferred. The existing native fabric adaptor
 finds subscription sources by walking upstream wiring, including nested graphs,
-and carries hidden version signals. This wrapper keeps explicit dependency lists
-until that lineage mechanism is added; it does not infer dependencies from every
-subscription in the surrounding scope.
+and carries hidden version signals. This adaptor keeps explicit dependency lists
+until that lineage mechanism is added.

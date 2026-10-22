@@ -1,111 +1,50 @@
-"""Optional hgraph integration: one graph-owned polling session per scope."""
-from contextlib import contextmanager
-from contextvars import ContextVar
-from dataclasses import dataclass, field
-from datetime import UTC, timedelta
+"""hgraph services backed by one threaded fabric session and a push source."""
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from math import isfinite
+from queue import Empty, Queue
+from threading import Thread
 from typing import TypeVar, get_type_hints
 
 from hgraph import (
-    AUTO_RESOLVE, COMPOUND_SCALAR, SIZE, STATE, TS, TSB, TSD, TSL,
-    EvaluationEngineApi, Frame, Size, TimeSeriesSchema, compute_node,
-    graph, schedule, sink_node, const,
+    AUTO_RESOLVE, COMPOUND_SCALAR, SIZE, STATE, TS, TSB, TSD, TSL, TSS,
+    REMOVE, EvaluationEngineApi, Frame, Size, TimeSeriesSchema, compute_node,
+    const, graph, impl_input, impl_output, push_queue, request_reply_service,
+    service_impl, sink_node, subscription_service,
 )
 from hgraph._frame import as_arrow_table
 from hgraph.adaptors.data_frame import schema_from_frame
+from pyarrow import Table
 
 from .data_cache import DataCache
 from .data_fabric_session import DataFabricTransport, PollingDataFabricSession
 
 __all__ = ("fabric_service", "subscribe", "version_id", "publish", "VersionId")
-
 VersionId = tuple[str, int]
-
 WEAK_SIZE = TypeVar("WEAK_SIZE", bound=Size)
 
 
-class _FabricIO(TimeSeriesSchema):
-    data: TSD[str, TS[Frame]]
-    versions: TSD[str, TS[VersionId]]
-    session: TS[object]
+# Erase row schemas at the service boundary so all typed clients use the same
+# implementation, worker and cut, rather than one service per schema/TSL size.
+@subscription_service
+def _subscribe(id: TS[str], path: str = "fabric") -> TS[Frame]: ...
 
 
-@dataclass(eq=False)
-class _Config:
-    cache: DataCache
-    transport: DataFabricTransport
-    subscriptions: set[str] = field(default_factory=set)
+@subscription_service
+def version_id(id: TS[str], path: str = "fabric") -> TS[VersionId]:
+    """Subscribe to the version selected by the shared consistent cut."""
+    ...
 
 
-_scope = ContextVar("hgraph_fabric_scope", default=None)
-
-
-@contextmanager
-def fabric_service(
-    cache: DataCache,
-    transport: DataFabricTransport,
-    *,
-    poll_interval: timedelta = timedelta(milliseconds=10),
-):
-    """Wire components inside one fabric session and consistent-cut scope.
-
-    Use inside the host graph. Subscription IDs are fixed during wiring; the
-    graph executor owns the session and polls once per interval without blocking.
-    The transport starts before the initial image loads and stops with the graph.
-    """
-    if poll_interval <= timedelta(0):
-        raise ValueError("Poll interval must be positive")
-    config = _Config(cache, transport)
-    token = _scope.set((config, _session_source(schedule(poll_interval, initial_delay=False), config)))
-    try:
-        yield
-    finally:
-        _scope.reset(token)
-
-
-def _service():
-    scope = _scope.get()
-    if scope is None:
-        raise RuntimeError("Fabric clients must be wired inside fabric_service(...)")
-    return scope
-
-
-@compute_node
-def _session_source(tick: TS[bool], config: _Config, _state: STATE = None) -> TSB[_FabricIO]:
-    changed = _state.session.poll(0)
-    delta = {"session": _state.session} if _state.first else {}
-    _state.first = False
-    if changed:
-        delta.update(data=changed, versions={
-            key: (key, int(data.schema.metadata[b"version"])) for key, data in changed.items()
-        })
-    return delta or None
-
-
-@_session_source.start
-def _start_session(config: _Config, _state: STATE = None):
-    session = PollingDataFabricSession(config.cache, config.transport)
-    try:
-        session.start()
-        session.add_subscriptions(sorted(config.subscriptions))
-    except BaseException:
-        session.stop()
-        raise
-    _state.session = session
-    _state.first = True
-
-
-@_session_source.stop
-def _stop_session(_state: STATE = None):
-    if hasattr(_state, "session"):
-        _state.session.stop()
+@request_reply_service
+def _publish(request: TS[object], path: str = "fabric") -> TS[VersionId]: ...
 
 
 @graph
-def subscribe(id: str, schema: type[COMPOUND_SCALAR] = AUTO_RESOLVE) -> TS[Frame[COMPOUND_SCALAR]]:
-    """Subscribe to a fixed dataset ID in the enclosing fabric service."""
-    config, io = _service()
-    config.subscriptions.add(id)
-    return _typed_frame[COMPOUND_SCALAR: schema](io.data[id])
+def subscribe(id: TS[str], schema: type[COMPOUND_SCALAR] = AUTO_RESOLVE,
+              path: str = "fabric") -> TS[Frame[COMPOUND_SCALAR]]:
+    """Subscribe to a dataset through the registered fabric service."""
+    return _typed_frame[COMPOUND_SCALAR: schema](_subscribe(id, path=path))
 
 
 @compute_node
@@ -116,59 +55,169 @@ def _typed_frame(data: TS[Frame], schema: type[COMPOUND_SCALAR] = AUTO_RESOLVE) 
     return frame
 
 
-@graph
-def version_id(id: str) -> TS[VersionId]:
-    """Return the subscribed data version, ticking alongside its selected table."""
-    config, io = _service()
-    config.subscriptions.add(id)
-    return io.versions[id]
+@dataclass(frozen=True, eq=False)
+class _Publication:
+    data: Table | None
+    id: str
+    dependencies: tuple[VersionId, ...]
+    weak_dependencies: tuple[VersionId, ...]
+    as_of: datetime
 
 
-def publish(
-    df: TS[Frame[COMPOUND_SCALAR]],
-    id: TS[str],
-    dependencies: TSL[TS[VersionId], SIZE],
-    weak_dependencies: TSL[TS[VersionId], WEAK_SIZE] = (),
-) -> None:
-    """Publish a table tick, or revise dependencies when only those inputs tick.
+def publish(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
+            dependencies: TSL[TS[VersionId], SIZE],
+            weak_dependencies: TSL[TS[VersionId], WEAK_SIZE] = (),
+            path: str = "fabric") -> TS[VersionId]:
+    """Request publication; reply with the persisted version, not subscribed data.
 
-    Explicit dependencies are required; use an empty TSL for a source dataset.
-    A changed ID publishes the currently valid table under the new ID. Published
-    results reach consumers through subscribe(), after notification and cut
-    selection, rather than directly from this sink.
+    A table/ID tick creates a version; dependency-only ticks revise its metadata.
+    Consumers must subscribe to receive data selected by the consistent cut.
     """
-    _, io = _service()
-    if isinstance(dependencies, (tuple, list)):
-        dependencies = (TSL.from_ts(*dependencies, tp=TS[VersionId]) if dependencies
-                        else const((), tp=TSL[TS[VersionId], Size[0]]))
-    if isinstance(weak_dependencies, (tuple, list)):
-        weak_dependencies = (TSL.from_ts(*weak_dependencies, tp=TS[VersionId]) if weak_dependencies
-                             else const((), tp=TSL[TS[VersionId], Size[0]]))
-    _publish(df, id, dependencies, weak_dependencies, io.session)
+    def inputs(value):
+        if isinstance(value, (tuple, list)):
+            return (TSL.from_ts(*value, tp=TS[VersionId]) if value
+                    else const((), tp=TSL[TS[VersionId], Size[0]]))
+        return value
+    return _publish(_publication(df, id, inputs(dependencies), inputs(weak_dependencies)), path=path)
 
 
-@sink_node(valid=("df", "id", "session"))
-def _publish(
-    df: TS[Frame[COMPOUND_SCALAR]],
-    id: TS[str],
-    dependencies: TSL[TS[VersionId], SIZE],
-    weak_dependencies: TSL[TS[VersionId], WEAK_SIZE],
-    session: TS[object],
-    _state: STATE = None,
-    _api: EvaluationEngineApi = None,
-) -> None:
+@compute_node(valid=("df", "id"))
+def _publication(df: TS[Frame[COMPOUND_SCALAR]], id: TS[str],
+                 dependencies: TSL[TS[VersionId], SIZE],
+                 weak_dependencies: TSL[TS[VersionId], WEAK_SIZE],
+                 _state: STATE = None, _api: EvaluationEngineApi = None) -> TS[object]:
     if ((len(dependencies) and not dependencies.all_valid)
             or (len(weak_dependencies) and not weak_dependencies.all_valid)):
         return
-    # A frame may have ticked while a dependency list was incomplete. Publish
-    # that retained frame once all dependencies arrive, even on a later tick.
+    # Retain a table tick until all dependencies are valid, even when they
+    # arrive in a later cycle. Each client tracks its own publication inputs.
     new_table = (getattr(_state, "data_time", None) != df.last_modified_time
                  or getattr(_state, "id", None) != id.value)
-    session.value.publish(
-        as_arrow_table(df.value) if new_table else None,
-        id=id.value, dependencies=tuple(dependencies.value) if len(dependencies) else (),
-        weak_dependencies=tuple(weak_dependencies.value) if len(weak_dependencies) else (),
-        as_of=_api.evaluation_clock.evaluation_time.replace(tzinfo=UTC),
-    )
-    _state.id = id.value
-    _state.data_time = df.last_modified_time
+    request = _Publication(
+        as_arrow_table(df.value) if new_table else None, id.value,
+        tuple(dependencies.value) if len(dependencies) else (),
+        tuple(weak_dependencies.value) if len(weak_dependencies) else (),
+        _api.evaluation_clock.evaluation_time.replace(tzinfo=UTC))
+    _state.id, _state.data_time = id.value, df.last_modified_time
+    return request
+
+
+class _FabricIO(TimeSeriesSchema):
+    data: TSD[str, TS[Frame]]
+    versions: TSD[str, TS[VersionId]]
+    replies: TSD[int, TS[VersionId]]
+
+
+class _Worker:
+    """One owner for storage, transport, subscription changes and publications."""
+
+    def __init__(self, cache, transport, poll_interval):
+        self.cache, self.transport, self.poll_interval = cache, transport, poll_interval
+
+    def start(self, sender):
+        self.commands = Queue()
+        self.error = None
+        self.thread = Thread(target=self.run, args=(sender,), name="fabric-adaptor")
+        self.thread.start()
+
+    def stop(self):
+        self.commands.put(None)
+        self.thread.join()
+        if self.error is not None:
+            raise self.error
+
+    def run(self, sender):
+        session = PollingDataFabricSession(self.cache, self.transport)
+        keys = frozenset()
+        try:
+            # Establish reception before the first subscription image loads.
+            session.start()
+            while True:
+                try:
+                    command = self.commands.get_nowait()
+                except Empty:
+                    command = ()
+                if command is None:
+                    break
+                if command:
+                    requested, publications, retired = command
+                    if retired:
+                        sender({"replies": {key: REMOVE for key in retired}})
+                    if requested != keys:
+                        # The core manager has no removal API. Rebuild just its
+                        # selection on membership changes; keep reception live.
+                        replacement = PollingDataFabricSession(self.cache, self.transport)
+                        replacement.add_subscriptions(sorted(requested))
+                        removed = keys - requested
+                        session, keys = replacement, requested
+                        if removed:
+                            sender({"data": {k: REMOVE for k in removed},
+                                    "versions": {k: REMOVE for k in removed}})
+                    for request_id, request in publications:
+                        _, update = session.publish(
+                            request.data, request.id, request.dependencies,
+                            request.weak_dependencies, request.as_of)
+                        sender({"replies": {request_id: (update.id, update.revision[0])}})
+                changed = session.poll(self.poll_interval)
+                if changed:
+                    sender({"data": changed, "versions": {
+                        k: (k, int(table.schema.metadata[b"version"]))
+                        for k, table in changed.items()}})
+        except BaseException as error:
+            self.error = error
+            sender(error)
+        finally:
+            try:
+                session.stop()
+            except BaseException as error:
+                if self.error is None:
+                    self.error = error
+                    sender(error)
+
+
+@push_queue(TS[object])
+def _session_events(sender, worker: _Worker):
+    worker.start(sender)
+
+
+@_session_events.stop
+def _stop_session(worker: _Worker):
+    worker.stop()
+
+
+@compute_node
+def _responses(event: TS[object]) -> TSB[_FabricIO]:
+    if isinstance(event.value, BaseException):
+        raise event.value
+    return event.value
+
+
+@sink_node(valid=())
+def _requests(data_ids: TSS[str], version_ids: TSS[str],
+              publications: TSD[int, TS[object]], worker: _Worker):
+    keys = frozenset(data_ids.value if data_ids.valid else ()) | frozenset(
+        version_ids.value if version_ids.valid else ())
+    requests = tuple((key, value.value) for key, value in publications.modified_items()
+                     if value.valid) if publications.valid else ()
+    retired = tuple(publications.removed_keys()) if publications.valid else ()
+    worker.commands.put((keys, requests, retired))
+
+
+@service_impl(interfaces=(_subscribe, version_id, _publish))
+def fabric_service(path: str, cache: DataCache, transport: DataFabricTransport,
+                   poll_interval: float = 0.05):
+    """Register with register_service(path, fabric_service, cache=..., transport=...).
+
+    All three interfaces share one worker. The graph sends requests without
+    waiting on storage or broker IO; results arrive through a push source.
+    poll_interval bounds the worker's broker wait (seconds), not graph polling.
+    """
+    if not isfinite(poll_interval) or poll_interval <= 0:
+        raise ValueError("Poll interval must be finite and positive")
+    worker = _Worker(cache, transport, poll_interval)
+    output = _responses(_session_events(worker))
+    _requests(impl_input(_subscribe, path), impl_input(version_id, path),
+              impl_input(_publish, path), worker)
+    impl_output(_subscribe, output.data, path)
+    impl_output(version_id, output.versions, path)
+    impl_output(_publish, output.replies, path)
