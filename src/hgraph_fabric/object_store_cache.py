@@ -3,6 +3,7 @@
 from dataclasses import asdict
 from datetime import datetime
 import json
+import re
 
 import obstore
 from obstore.store import ObjectStore
@@ -27,12 +28,10 @@ class ObjectStoreDataCache(DataCache):
     def __init__(self, store: ObjectStore, namespace: DataNamespace = "fabric") -> None:
         super().__init__()
         self._store = store
-        self._prefix = f"namespace-{namespace.encode('utf-8').hex()}"
+        self._prefix = _name(namespace)
 
     def _path(self, data_id: DataId, name: str) -> str:
-        # Hex preserves IDs exactly, including slashes, dot segments, empty IDs
-        # and case distinctions on case-insensitive local filesystems.
-        return f"{self._prefix}/id-{data_id.encode('utf-8').hex()}/{name}"
+        return f"{self._prefix}/{_name(data_id)}/{name}"
 
     def _read(self, path: str, key):
         try:
@@ -64,13 +63,13 @@ class ObjectStoreDataCache(DataCache):
 
     def write_version(self, version_id: DataVersionId, data: pa.Table) -> None:
         data_id, version = version_id
+        path = self._path(data_id, f"versions/{version}.arrow")
         sink = pa.BufferOutputStream()
         with pa.ipc.new_file(sink, data.schema) as writer:
             writer.write_table(data)
         # obstore imports unsigned-byte buffers; Arrow exposes signed bytes.
         payload = obstore.Bytes(memoryview(sink.getvalue()).cast("B"))
-        obstore.put(self._store, self._path(data_id, f"versions/{version}.arrow"),
-                    payload, mode="create")
+        obstore.put(self._store, path, payload, mode="create")
 
     def write_revision(self, revision_id: DataRevisionId, details: DataRevisionDetails) -> None:
         data_id, version, count = revision_id
@@ -82,6 +81,24 @@ class ObjectStoreDataCache(DataCache):
     def write_latest(self, data_id: DataId, details: LatestDataDetails) -> None:
         obstore.put(self._store, self._path(data_id, "latest.json"),
                     json.dumps(details.revision, separators=(",", ":")).encode("utf-8"))
+
+
+def _name(value: str) -> str:
+    # Lowercase avoids aliases on case-insensitive filesystems. Windows device
+    # names remain reserved even with an extension, e.g. nul.data.
+    if (not isinstance(value, str)
+            or re.fullmatch(r"[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?", value) is None
+            or value.split(".", 1)[0] in {
+                "con", "prn", "aux", "nul",
+                *(f"com{i}" for i in range(1, 10)),
+                *(f"lpt{i}" for i in range(1, 10)),
+            }):
+        raise ValueError(
+            "Namespace and data ID must be 1-128 lowercase ASCII letters, digits, "
+            "dots, underscores or hyphens, start and end with a letter or digit, "
+            "and not be a Windows device name"
+        )
+    return value
 
 
 def _pair(value, first_type):

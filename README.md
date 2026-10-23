@@ -188,9 +188,20 @@ or `fabric_service`.
 
 Tables are stored as Arrow IPC files, preserving schema and field metadata.
 Revisions and latest pointers are JSON; timestamps use ISO format and nullable
-dependency tuples remain distinct from empty tuples. Namespaces and IDs are
-UTF-8 hex encoded in paths, so slashes, dot segments and case distinctions cannot
-alias other datasets, including on case-insensitive filesystems.
+dependency tuples remain distinct from empty tuples. Namespaces and IDs appear
+verbatim in readable paths, for example:
+
+```text
+market-data/prices.close/versions/100.arrow
+market-data/prices.close/revisions/100/0.json
+market-data/prices.close/latest.json
+```
+
+Names must be 1–128 lowercase ASCII letters, digits, dots, underscores or hyphens,
+starting and ending with a letter or digit. Windows device names such as `con`,
+`nul.data` and `com1` are rejected. Uppercase is rejected to avoid aliases on
+case-insensitive filesystems. Invalid names raise `ValueError` before storage
+access; names are never escaped or silently normalised.
 
 Publication writes the table, revision, then latest pointer. Version and revision
 objects are create-only: attempts to reuse them fail rather than overwrite history.
