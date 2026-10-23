@@ -85,7 +85,7 @@ class StorageContract:
 
     def test_readable_namespaces_and_ids_are_isolated(self):
         ids = ("prices.close", "prices-close", "prices_close", "a", "a..b", "9", "x" * 128)
-        for namespace in ("market-data", "market.data", "market_data"):
+        for namespace in ("market-data", "market.data", "market_data", "market-data/equities", "market-data/fx"):
             for index, data_id in enumerate(ids):
                 table = pa.table({"value": [index]})
                 _, update = self.cache(namespace).write(table, id=data_id, as_of=AS_OF)
@@ -98,19 +98,19 @@ class StorageContract:
             self.cache("absent").latest("a")
 
     def test_object_paths_preserve_names_verbatim(self):
-        self.cache("market-data").write(
+        self.cache("market-data/equities/us").write(
             pa.table({"value": [1]}, metadata={b"version": b"100"}),
             id="prices.close", as_of=AS_OF,
         )
         paths = {item["path"] for item in obstore.list(self.store()).collect()}
         self.assertEqual(paths, {
-            "market-data/prices.close/versions/100.arrow",
-            "market-data/prices.close/revisions/100/0.json",
-            "market-data/prices.close/latest.json",
+            "market-data/equities/us/prices.close/versions/100.arrow",
+            "market-data/equities/us/prices.close/revisions/100/0.json",
+            "market-data/equities/us/prices.close/latest.json",
         })
 
     def test_invalid_names_are_rejected_before_storage_access(self):
-        invalid = ("", ".", "..", "a/b", "a\\b", "a%2fb", "Prices", "源", "a b",
+        invalid = ("", ".", "..", "a\\b", "a%2fb", "Prices", "源", "a b",
                    "a.", "a-", "_a", "a\n", "con", "nul.data", "com1", "lpt9.txt",
                    "x" * 129)
         with patch("obstore.get") as get, patch("obstore.put") as put:
@@ -119,6 +119,8 @@ class StorageContract:
                     with self.assertRaises(ValueError):
                         self.cache(name)
                     with self.assertRaises(ValueError):
+                        self.cache(f"market-data/{name}")
+                    with self.assertRaises(ValueError):
                         self.cache().write(pa.table({"a": [1]}), id=name)
                     with self.assertRaises(ValueError):
                         self.cache().get_version((name, 1))
@@ -126,6 +128,13 @@ class StorageContract:
                         self.cache().get_revision((name, 1, 0))
             get.assert_not_called()
             put.assert_not_called()
+
+    def test_namespace_separators_require_valid_nonempty_segments(self):
+        for namespace in ("/a", "a/", "a//b", "a/./b", "a/../b"):
+            with self.subTest(namespace=namespace), self.assertRaises(ValueError):
+                self.cache(namespace)
+        with self.assertRaises(ValueError):
+            self.cache("a/b").write(pa.table({"a": [1]}), id="prices/close")
 
     def test_missing_records_raise_key_error_with_requested_key(self):
         reader = self.cache()

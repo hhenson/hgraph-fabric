@@ -192,12 +192,17 @@ dependency tuples remain distinct from empty tuples. Namespaces and IDs appear
 verbatim in readable paths, for example:
 
 ```text
-market-data/prices.close/versions/100.arrow
-market-data/prices.close/revisions/100/0.json
-market-data/prices.close/latest.json
+market-data/equities/us/prices.close/versions/100.arrow
+market-data/equities/us/prices.close/revisions/100/0.json
+market-data/equities/us/prices.close/latest.json
 ```
 
-Names must be 1–128 lowercase ASCII letters, digits, dots, underscores or hyphens,
+Namespaces support `/`-separated segments, such as `market-data/equities/us`.
+Leading, trailing or repeated separators and `.` or `..` segments are rejected.
+Data IDs remain single path components and cannot contain `/`.
+
+Each namespace segment and data ID must be 1–128 lowercase ASCII letters,
+digits, dots, underscores or hyphens,
 starting and ending with a letter or digit. Windows device names such as `con`,
 `nul.data` and `com1` are rejected. Uppercase is rejected to avoid aliases on
 case-insensitive filesystems. Invalid names raise `ValueError` before storage

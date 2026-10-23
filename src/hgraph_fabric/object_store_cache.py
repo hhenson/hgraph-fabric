@@ -28,7 +28,7 @@ class ObjectStoreDataCache(DataCache):
     def __init__(self, store: ObjectStore, namespace: DataNamespace = "fabric") -> None:
         super().__init__()
         self._store = store
-        self._prefix = _name(namespace)
+        self._prefix = "/".join(_name(segment) for segment in namespace.split("/"))
 
     def _path(self, data_id: DataId, name: str) -> str:
         return f"{self._prefix}/{_name(data_id)}/{name}"
@@ -94,7 +94,7 @@ def _name(value: str) -> str:
                 *(f"lpt{i}" for i in range(1, 10)),
             }):
         raise ValueError(
-            "Namespace and data ID must be 1-128 lowercase ASCII letters, digits, "
+            "Namespace segments and data IDs must be 1-128 lowercase ASCII letters, digits, "
             "dots, underscores or hyphens, start and end with a letter or digit, "
             "and not be a Windows device name"
         )
