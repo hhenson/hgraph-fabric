@@ -12,7 +12,7 @@ import pyarrow as pa
 from .data_cache import DataCache
 from .data_structures import (
     DataId, DataNamespace, DataRevisionDetails, DataRevisionId,
-    DataVersionId, LatestDataDetails,
+    DataUpdateDetails, DataVersionId, LatestDataDetails,
 )
 
 
@@ -38,6 +38,18 @@ class ObjectStoreDataCache(DataCache):
             return obstore.get(self._store, path).bytes()
         except FileNotFoundError as error:
             raise KeyError(key) from error
+
+    def write(
+        self,
+        data: pa.Table | None = None,
+        id: DataId | None = None,
+        dependencies: tuple[DataVersionId, ...] = (),
+        weak_dependencies: tuple[DataVersionId, ...] = (),
+        as_of: datetime | None = None,
+    ) -> tuple[pa.Table, DataUpdateDetails]:
+        # Reject invalid references before the create-only Arrow object is stored.
+        _validate_dependency_names(dependencies, weak_dependencies)
+        return super().write(data, id, dependencies, weak_dependencies, as_of)
 
     def load_latest(self, data_id: DataId) -> DataRevisionId:
         value = json.loads(bytes(self._read(self._path(data_id, "latest.json"), data_id)))
@@ -73,9 +85,7 @@ class ObjectStoreDataCache(DataCache):
 
     def write_revision(self, revision_id: DataRevisionId, details: DataRevisionDetails) -> None:
         data_id, version, count = revision_id
-        for dependencies in (details.dependencies, details.weak_dependencies):
-            for dependency_id, _ in dependencies or ():
-                _name(dependency_id)
+        _validate_dependency_names(details.dependencies, details.weak_dependencies)
         value = asdict(details)
         value["as_of"] = details.as_of.isoformat()
         obstore.put(self._store, self._path(data_id, f"revisions/{version}/{count}.json"),
@@ -84,6 +94,12 @@ class ObjectStoreDataCache(DataCache):
     def write_latest(self, data_id: DataId, details: LatestDataDetails) -> None:
         obstore.put(self._store, self._path(data_id, "latest.json"),
                     json.dumps(details.revision, separators=(",", ":")).encode("utf-8"))
+
+
+def _validate_dependency_names(*groups):
+    for dependencies in groups:
+        for dependency_id, _ in dependencies or ():
+            _name(dependency_id)
 
 
 def _name(value: str) -> str:

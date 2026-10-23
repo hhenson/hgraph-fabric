@@ -144,6 +144,25 @@ class StorageContract:
                     self.cache().write_revision(("prices", 100, 0), details)
                 put.assert_not_called()
 
+    def test_invalid_dependencies_allow_retry_with_the_same_version(self):
+        for field in ("dependencies", "weak_dependencies"):
+            for existing in (False, True):
+                with self.subTest(field=field, existing=existing):
+                    namespace = f"{field}-{int(existing)}"
+                    writer = self.cache(namespace)
+                    if existing:
+                        self.publish(writer, 100)
+                    before = {item["path"] for item in obstore.list(self.store()).collect()}
+                    with self.assertRaises(ValueError):
+                        self.publish(writer, 200, **{field: (("source/a", 7),)})
+                    self.assertEqual(
+                        {item["path"] for item in obstore.list(self.store()).collect()}, before,
+                    )
+                    # A corrected retry must publish exactly the requested version.
+                    _, update = self.publish(writer, 200, **{field: (("source.a", 7),)})
+                    self.assertEqual(update.revision, (200, 0))
+                    self.assertEqual(self.cache(namespace).latest("prices"), ("prices", 200, 0))
+
     def test_missing_records_raise_key_error_with_requested_key(self):
         reader = self.cache()
         for method, key in ((reader.latest, "missing"), (reader.get_version, ("missing", 1)),
