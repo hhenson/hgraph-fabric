@@ -60,7 +60,7 @@ class StorageContract:
         self.assertTrue(self.cache().get_version(("large", update.revision[0])).equals(table, check_metadata=True))
 
     def test_revision_metadata_preserves_nullable_dependencies_and_time(self):
-        for count, deps in enumerate((None, (), (("源/a", 7), ("b", 99)))):
+        for count, deps in enumerate((None, (), (("source.a", 7), ("b", 99)))):
             with self.subTest(deps=deps):
                 details = DataRevisionDetails(deps, deps, (7, 4) if count == 0 else None, AS_OF)
                 self.cache().write_revision(("prices", 100, count), details)
@@ -135,6 +135,14 @@ class StorageContract:
                 self.cache(namespace)
         with self.assertRaises(ValueError):
             self.cache("a/b").write(pa.table({"a": [1]}), id="prices/close")
+
+    def test_invalid_dependency_ids_cannot_be_persisted(self):
+        for deps, weak in (((("source/a", 7),), ()), ((), (("Source", 7),))):
+            with self.subTest(dependencies=deps, weak_dependencies=weak):
+                details = DataRevisionDetails(deps, weak, None, AS_OF)
+                with patch("obstore.put") as put, self.assertRaises(ValueError):
+                    self.cache().write_revision(("prices", 100, 0), details)
+                put.assert_not_called()
 
     def test_missing_records_raise_key_error_with_requested_key(self):
         reader = self.cache()

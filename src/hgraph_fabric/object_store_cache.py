@@ -73,6 +73,9 @@ class ObjectStoreDataCache(DataCache):
 
     def write_revision(self, revision_id: DataRevisionId, details: DataRevisionDetails) -> None:
         data_id, version, count = revision_id
+        for dependencies in (details.dependencies, details.weak_dependencies):
+            for dependency_id, _ in dependencies or ():
+                _name(dependency_id)
         value = asdict(details)
         value["as_of"] = details.as_of.isoformat()
         obstore.put(self._store, self._path(data_id, f"revisions/{version}/{count}.json"),
