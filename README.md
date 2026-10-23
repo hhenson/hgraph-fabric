@@ -100,7 +100,6 @@ align either history with the fixed side, an exceptional fallback searches both
 histories within their proposed bounds. It preserves those matching preferences
 and does not change selections. This fallback can require a quadratic number of
 tree comparisons; successful normal comparisons do not enter it.
-Concrete storage backends and end-to-end fabric execution are not implemented.
 
 The cache's `latest(data_id)` returns a revision ID. Historical version lookup
 starts there and follows the `(version, revision_count)` pair in
@@ -163,9 +162,53 @@ We will build the components incrementally in Python to establish the structure
 and semantics. A later port to Rust or C++ remains an open decision. Integration
 with hgraph will follow once the standalone components are established.
 
-The initial implementation milestone is a working Python core with in-memory
-storage. Durable storage adapters come later.
 Individual components and their APIs will be agreed as we build them.
+
+## Object storage
+
+Install `hgraph-fabric[storage]` to use `ObjectStoreDataCache`, backed by
+[obstore](https://developmentseed.org/obstore/latest/getting-started/), the Python
+bindings to Rust's `object_store`. The same cache implementation accepts memory,
+filesystem, or S3 stores:
+
+```python
+from obstore.store import LocalStore, MemoryStore, S3Store
+from hgraph_fabric.object_store_cache import ObjectStoreDataCache
+
+memory = ObjectStoreDataCache(MemoryStore(), namespace="market-data")
+local = ObjectStoreDataCache(LocalStore("./fabric-data", mkdir=True), namespace="market-data")
+s3 = ObjectStoreDataCache(S3Store("my-fabric-bucket", region="us-east-1"), namespace="market-data")
+```
+
+Configure credentials, endpoints and store prefixes through obstore. The S3
+bucket must already exist. Reuse the same `MemoryStore` instance for memory
+readers; construct new filesystem/S3 stores pointing at the same location for
+independent readers. Pass any of these caches directly to `DataFabricSession`
+or `fabric_service`.
+
+Tables are stored as Arrow IPC files, preserving schema and field metadata.
+Revisions and latest pointers are JSON; timestamps use ISO format and nullable
+dependency tuples remain distinct from empty tuples. Namespaces and IDs are
+UTF-8 hex encoded in paths, so slashes, dot segments and case distinctions cannot
+alias other datasets, including on case-insensitive filesystems.
+
+Publication writes the table, revision, then latest pointer. Version and revision
+objects are create-only: attempts to reuse them fail rather than overwrite history.
+Use one coordinated writer per data ID; this backend does not add multi-writer
+transactions to `DataCache`. A failed publication can leave unreferenced objects,
+but failures before the head write do not advance latest. Storage errors propagate;
+only missing objects become the cache's `KeyError`. Arrow snapshots are buffered
+in memory for upload.
+
+Readers retain the normal cache semantics: deliver updates to their associated
+managers, or construct a fresh cache to load a new snapshot from storage.
+
+The storage tests exercise real `MemoryStore` and `LocalStore` instances. To run
+the same contract against an existing S3-compatible test bucket, set
+`HGRAPH_FABRIC_S3_ENDPOINT`, `HGRAPH_FABRIC_S3_BUCKET`, and the usual AWS credential
+environment variables, then run
+`python -m unittest discover -s tests -p test_object_store_cache.py`.
+Each S3 test uses a unique prefix and removes its own objects afterwards.
 
 ## Sessions
 
