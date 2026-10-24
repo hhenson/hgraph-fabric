@@ -7,6 +7,9 @@ The concept connects independent computations through complete, versioned
 datasets. Lineage records describe which input versions a computation has
 accepted, including when its output is unchanged.
 
+The [paper draft](docs/paper/README.md) develops the model's motivation and
+conceptual contribution as a sequence of Markdown sections.
+
 ## Status
 
 The package currently provides identity aliases, frozen revision metadata,
