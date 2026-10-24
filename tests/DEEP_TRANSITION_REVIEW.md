@@ -3,6 +3,18 @@
 Originally reviewed production tree: `0bfbe78` (merged PR #17). The ordering
 finding below is now addressed, and both reproductions are passing regressions.
 
+## Subsequent correction: resolve intermediate revisions
+
+The root-only search described in this review treated latest intermediate
+records as mandatory. The resolver now searches revisions within each referenced
+data version before moving either subscribed root, and retains those choices in
+the committed graph. The historical expansion examples below remain useful, but
+they do not establish that intermediate revision resolution is impossible.
+Binary count bounds now use verified immutable immediate records, rather than
+latest-expanded descendant versions. The regression suite checks selected
+records against a raw-record oracle and includes actual publication/delivery
+scenarios in `test_dependency_revision_resolution.py`.
+
 ## Finding: refreshed descendants invalidate count-search ordering (addressed)
 
 The reviewed `consistent_cut.py:173-178` used the first/last expanded dependency versions to

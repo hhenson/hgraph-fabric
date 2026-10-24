@@ -1,4 +1,6 @@
 """The exceptional joint-history fallback, including explicit search ceilings."""
+from adversarial_cases import current_choices
+
 from itertools import permutations, product
 import unittest
 from unittest.mock import patch
@@ -120,4 +122,4 @@ class CrossedHistoryTests(unittest.TestCase):
             self.assertEqual(current_cut(manager), before)
         self.assertEqual(manager.apply_update(history.add("a", 50000, dependencies=(("x", 2), ("y", 2)))), set())
         self.assertEqual(manager.apply_update(history.add("b", 50000, dependencies=(("x", 2), ("y", 2)))), {("a", 50000), ("b", 50000)})
-        self.assertTrue(history.consistent(current_cut(manager)))
+        self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))

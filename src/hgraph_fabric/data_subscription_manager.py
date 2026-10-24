@@ -132,9 +132,9 @@ class DataSubscriptionManager:
             if current[key] is None or sub.current_revision[1] > current[key][1]
         }
 
-    def _index_dependencies(self, sub: DataSubscriptionGraph) -> None:
-        dependencies = set()
-        pending = list({sub.current_revision, sub.latest_revision} - {None})
+    def _dependency_versions(self, sub, current_revision, choices):
+        dependencies = set(choices)
+        pending = list({current_revision, sub.latest_revision} - {None})
         visited = set()
         while pending:
             revision = pending.pop()
@@ -153,6 +153,13 @@ class DataSubscriptionManager:
                 if version[0] != sub.data_id:
                     dependencies.add(version)
                 pending.append(self._cache.get_latest_revision(version))
+        return dependencies
+
+    def _index_dependencies(self, sub: DataSubscriptionGraph) -> None:
+        self._set_dependency_index(sub, self._dependency_versions(
+            sub, sub.current_revision, sub.current_dependency_revisions))
+
+    def _set_dependency_index(self, sub, dependencies):
         previous = self._subscription_dependencies.get(sub.data_id, set())
         for version in previous - dependencies:
             self._dependents[version].remove(sub.data_id)
@@ -162,17 +169,12 @@ class DataSubscriptionManager:
             self._dependents.setdefault(version, set()).add(sub.data_id)
         self._subscription_dependencies[sub.data_id] = dependencies
 
-    def _track_conflicts(self, left: DataSubscriptionGraph, right: DataSubscriptionGraph) -> None:
+    def _track_conflicts(self, left: DataSubscriptionGraph, right: DataSubscriptionGraph, resolutions=None) -> None:
         """Watch revisions that can change the paths to a version mismatch."""
-        graphs = left.proposed_graph(self._cache), right.proposed_graph(self._cache)
-        nodes = [dict(graph.nodes()) | {sub.data_id: sub.proposed_revision[1]}
-                 for graph, sub in zip(graphs, (left, right))]
-        if left.data_id in nodes[1]:
-            common = {left.data_id}  # Containment only compares the root.
-        elif right.data_id in nodes[0]:
-            common = {right.data_id}
-        else:
-            common = nodes[0].keys() & nodes[1].keys()
+        resolutions = resolutions or (left.proposal(self._cache), right.proposal(self._cache))
+        graphs = tuple(resolution.graph for resolution in resolutions)
+        nodes = [resolution.nodes for resolution in resolutions]
+        common = nodes[0].keys() & nodes[1].keys()
         conflicts = {key for key in common if nodes[0][key] != nodes[1][key]}
         for graph, sub in zip(graphs, (left, right)):
             # Changing the mismatched node's revision cannot change its data
@@ -232,19 +234,22 @@ class DataSubscriptionManager:
             if sub.latest_revision is None:
                 raise LookupError(f"No latest revision is selected for {sub.data_id!r}")
         for sub in subscriptions:
-            sub.proposed_revision = sub.latest_revision
+            sub.reset_proposal()
 
     def _commit_proposals(self, subscriptions: tuple[DataSubscriptionGraph, ...]) -> None:
         # Even a single subscription must expand its full proposed tree. Do all
         # loads before selecting/pruning any current so a failure is atomic.
         for sub in subscriptions:
             sub.proposed_graph(self._cache)
-        # Search only touches proposed selections. Prune history when the whole
-        # cut is accepted, using the normal current setter for changed items.
+        indexes = []
         for sub in subscriptions:
-            if sub.current_revision != sub.proposed_revision:
-                sub.current_revision = sub.proposed_revision
-                self._index_dependencies(sub)
+            resolution = sub.proposal(self._cache)
+            choices = set(resolution.revisions) - {resolution.root[:2]}
+            indexes.append(self._dependency_versions(sub, sub.proposed_revision, choices))
+        # Complete all metadata reads before changing any committed selection.
+        for sub, dependencies in zip(subscriptions, indexes):
+            sub.commit_proposal(self._cache)
+            self._set_dependency_index(sub, dependencies)
         self._consistent_revisions = {sub.data_id: sub.current_revision for sub in subscriptions}
         self._dirty_subscriptions.clear()
         self._pending_cuts.clear()
@@ -265,7 +270,8 @@ class DataSubscriptionManager:
         updated: int | None = None,
     ) -> list[int]:
         left, right = (subscriptions[i] for i in pair)
-        before = left.proposed_revision, right.proposed_revision
+        before_resolutions = left.proposal(self._cache), right.proposal(self._cache)
+        before_states = tuple(r.signature for r in before_resolutions)
         try:
             if updated is None:
                 revisions = find_consistent_cut(left, right, self._cache)
@@ -277,15 +283,16 @@ class DataSubscriptionManager:
         except NoConsistentCutError:
             self._track_conflicts(left, right)
             raise
-        if revisions != before:
-            # Track causes only when a comparison actually downgrades a
-            # proposal. Already-consistent pairs need no additional walk.
-            self._track_conflicts(left, right)
-        changed = []
+        after = []
         for index, revision in zip(pair, revisions):
-            if subscriptions[index].proposed_revision != revision:
-                subscriptions[index].proposed_revision = revision
-                changed.append(index)
+            sub = subscriptions[index]
+            sub.proposed_revision = revision
+            after.append(sub.proposal(self._cache).signature)
+        changed = [index for index, old, new in zip(pair, before_states, after) if old != new]
+        if changed:
+            # Causes belong to the graphs before resolution, including a
+            # revision-only change below an unchanged subscribed root.
+            self._track_conflicts(left, right, before_resolutions)
         return changed
 
     def _advance_cut(self, subscriptions: tuple[DataSubscriptionGraph, ...], updated: int) -> bool:
@@ -321,6 +328,8 @@ class DataSubscriptionManager:
             i for i in others
             if subscriptions[i].proposed_revision == subscriptions[i].current_revision
             and subscriptions[i].data_id not in self._dirty_subscriptions
+            and subscriptions[i]._current_resolution is not None
+            and subscriptions[i].proposal(self._cache).signature == subscriptions[i]._current_resolution.signature
         ]
         improved = [i for i in others if i not in stable]
         return self._stabilize(subscriptions, stable, improved, updated)

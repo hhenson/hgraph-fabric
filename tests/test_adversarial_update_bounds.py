@@ -1,4 +1,6 @@
 """Committed currents bound update searches, including omission fallbacks."""
+from adversarial_cases import current_choices
+
 from itertools import permutations, product
 import unittest
 
@@ -29,7 +31,7 @@ class UpdateBoundTests(unittest.TestCase):
                 self.assertEqual(current_cut(manager), {
                     "a": ("a", 200, 0), "b": ("b", *current), "c": ("c", 100, 0),
                 })
-                self.assertTrue(history.consistent(current_cut(manager)))
+                self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_floor_count_excludes_older_exact_match_without_loading_it(self):
         history = History()
@@ -127,4 +129,4 @@ class UpdateBoundTests(unittest.TestCase):
         self.assertEqual(manager.apply_update(
             history.add("middle", 100, 1, dependencies=(("x", 2),))
         ), {("a", 9000)})
-        self.assertTrue(history.consistent(current_cut(manager)))
+        self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
