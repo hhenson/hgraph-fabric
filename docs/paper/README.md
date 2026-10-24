@@ -13,6 +13,7 @@ are the working manuscript; a more formal publication format will follow.
 2. [Introduction](01-introduction.md)
 
 The abstract captures the agreed framing. The introduction motivates the model
-with a market-data, portfolio-risk, and batch-trading example. Formal guarantees, comparison with related work, and
-evaluation remain to be developed; the draft does not claim that those results
-have already been established.
+with a desired-positions, trading-universe, validation, and order workflow.
+Formal guarantees, comparison with related work, and evaluation remain to be
+developed; the draft does not claim that those results have already been
+established.

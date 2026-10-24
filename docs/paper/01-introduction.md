@@ -1,102 +1,127 @@
 # Introduction
 
-Risk and batch trading computations bring together datasets produced on
-independent schedules. Market data is refreshed, positions are reconciled,
-portfolio risk is calculated, and trading processes construct batches of
-orders. These computations can take different amounts of time. A new market
-snapshot may be available while a risk calculation using the preceding
-snapshot is still the latest published result. A downstream trading process
-needs to know which of these datasets can be used together.
+Risk and batch trading computations bring together datasets produced by
+independently executing components. A strategy publishes desired positions;
+other components determine the instruments required, load supporting data,
+validate the proposed positions, and construct orders. These components can
+run on different schedules and take different amounts of time. The downstream
+computation needs to know which versions of their outputs can be used together.
+
+Consider the following simplified batch trading workflow:
+
+1. A strategy submits its desired positions.
+2. The trading universe is updated if necessary.
+3. When the universe changes, the system loads analytics, a market-data
+   snapshot, and instrument reference data for that universe.
+4. The desired positions are validated using those datasets.
+5. Following successful validation, orders are created and sent.
+
+The dataflow is shown below. Arrows run from an input to the computation that
+consumes it. Analytics and market-data snapshots may also be refreshed on
+independent timers; those triggers are omitted from the diagram.
+
+```mermaid
+flowchart LR
+    P[Desired positions] --> U[Trading universe]
+    U --> A[Analytics]
+    U --> M[Market-data snapshot]
+    U --> R[Instrument reference data]
+    P --> V[Validation]
+    A --> V
+    M --> V
+    R --> V
+    V --> O[Create and send orders]
+```
+
+Desired positions reach validation by more than one path. They are a direct
+input, and they also determine the universe on which the supporting datasets
+depend. For example, instrument reference data depends on the universe, which
+in turn depends on desired positions. Validation must reconcile its direct
+positions input with the positions accepted along these indirect paths.
 
 Versioning each dataset makes individual publications identifiable, but does
-not by itself establish which publications form a coherent view. The latest
-version of one dataset may depend on an older version of another. A further
-difficulty arises when a computation processes a new input and retains its
-existing output: the data has not changed, but the computation has made
-progress. Downstream consumers need a way to distinguish this progress from
-an input that has not yet been processed.
+not by itself establish which publications form a coherent view. Suppose a
+strategy adds an instrument to its desired positions. The new positions may
+arrive at validation before the universe and supporting datasets have been
+updated. Taking the latest available value of each dataset could combine
+positions for the expanded universe with reference data or analytics loaded
+for the preceding universe. Explicit dependency records allow validation to
+retain its preceding coherent selection until compatible inputs are available.
 
-Consider a batch trading process that subscribes to a market-price snapshot
-named `market` and a portfolio risk table named `risk`. The risk calculation
-consumes the same market dataset. For this example, the risk table reports
-market-value exposure for a portfolio holding 100 units of asset A. The market
-snapshot also contains asset B, which is not currently held but is a candidate
-for the next trading batch. Positions, model parameters, and other inputs
-remain fixed throughout the example.
+A subtler case occurs when the desired positions change without changing the
+universe. Suppose `positions@100` requests 100 units of A and 50 units of B.
+The universe builder publishes `universe@7`, containing A and B, and records
+that it accepted `positions@100`. The analytics, market-data, and reference-data
+publications each identify `universe@7` as an input. Validation can combine
+these datasets with `positions@100`.
 
-Initially, `market@100` prices A at 100 and B at 50. The corresponding
-`risk@7` reports exposure of 10,000 and records that it accepted
-`market@100`. The trading process can use these two versions together.
-When `market@101` raises A's price to 105, the existing risk table still
-reflects the preceding snapshot. Combining the latest publications would
-construct orders using the new prices alongside exposure calculated from
-older prices. The fabric instead retains `market@100` with `risk@7` for
-this consumer. Once the risk calculation publishes `risk@8`, reporting
-exposure of 10,500 and accepting `market@101`, the consumer can advance
-both selections.
+The strategy then publishes `positions@101`, changing the requested quantity
+of A to 120 while retaining the same instruments. The universe builder
+processes the update and determines that A and B still form the required
+universe. No new universe value is needed. Nor does this positions update
+require reloading instrument reference data merely to reproduce the same
+universe coverage.
 
-Now suppose `market@102` changes only B's price, from 50 to 51. The risk
-calculation processes the new snapshot, but the portfolio still holds only A,
-whose price is unchanged. Its exposure remains 10,500, so the existing
-`risk@8` table can be retained. The trading process nevertheless needs the
-new price of B when constructing its next batch.
+The universe's data version alone cannot distinguish two states: the builder
+has not yet processed the new desired positions, or it has processed them and
+found that the existing universe remains suitable. If no acknowledgement is
+recorded, validation cannot establish agreement between `positions@101` and
+the older positions dependency reached through the supporting datasets.
+Republishing the unchanged universe as a new data version would communicate
+progress by introducing a new value identity where none is needed.
 
-The risk table's version alone cannot tell the consumer whether the risk
-calculation has accepted `market@102` or has not yet processed it. The
-consumer should not need to reproduce the risk calculation to establish that
-its result remains applicable. Republishing the same table solely to
-communicate acceptance would introduce another data version without a new
-risk result.
+hgraph fabric separates a **data version** from a **dependency revision**.
+A version identifies an immutable published dataset. A revision records the
+input versions accepted by the computation producing or retaining that dataset.
+The universe builder can therefore publish `universe@7/r1`, acknowledging
+`positions@101` while retaining the data in `universe@7`.
 
-hgraph fabric distinguishes a **data version** from a **dependency revision**.
-A version identifies an immutable published table. A revision records the
-input versions accepted by the producer while producing or retaining that
-table. Here, the risk calculation publishes a new revision of `risk@8`
-that accepts `market@102`, leaving the risk table unchanged. This metadata
-update allows the trading process to use the new market snapshot with the
-existing risk result.
-
-The sequence is shown below. The notation `risk@8/r1` denotes revision 1 of
-data version 8. Revision counts start at zero within each data version.
-Version numbers are local to their dataset: 102 and 8 are not positions on a
-shared clock. Fixed dependencies, such as positions, are omitted from the
-table. The rows describe an illustrative sequence, not a requirement for a
-global event order.
-
-| Publication or computation | Latest market snapshot | Latest risk record | Market version accepted by that record | Trading process's coherent selection |
+| State | Latest desired positions | Universe record | Positions accepted by the universe | Positions admissible with the existing supporting datasets |
 | --- | --- | --- | --- | --- |
-| Initial state | `market@100`: A=100, B=50 | `risk@7/r0`: 10,000 | `market@100` | `market@100`, `risk@7` |
-| A's price changes | `market@101`: A=105, B=50 | `risk@7/r0`: 10,000 | `market@100` | `market@100`, `risk@7` |
-| Risk calculation publishes changed exposure | `market@101`: A=105, B=50 | `risk@8/r0`: 10,500 | `market@101` | `market@101`, `risk@8` |
-| Only B's price changes | `market@102`: A=105, B=51 | `risk@8/r0`: 10,500 | `market@101` | `market@101`, `risk@8` |
-| Risk calculation acknowledges unchanged exposure | `market@102`: A=105, B=51 | `risk@8/r1`: 10,500 | `market@102` | `market@102`, `risk@8` |
+| Initial coherent view | `positions@100`: A=100, B=50 | `universe@7/r0`: A, B | `positions@100` | `positions@100` |
+| Strategy changes quantities | `positions@101`: A=120, B=50 | `universe@7/r0`: A, B | `positions@100` | `positions@100` |
+| Universe builder acknowledges no membership change | `positions@101`: A=120, B=50 | `universe@7/r1`: A, B | `positions@101` | `positions@101` |
 
-The last transition separates three kinds of progress. The market-data
-publisher has supplied new prices; the risk calculation has accepted them
-without publishing a new table; and the trading process can now use a newer
-coherent view. Only the market dataset changes in the consumer's selected
-data. The risk revision advances consistency without creating a new risk
-value.
+Here, `r1` denotes revision 1 within data version 7. Version numbers are local
+to each dataset; 101 and 7 are not positions on a shared clock.
 
-Acceptance is an assertion made by the producing computation. It states that
-the retained output is suitable for the recorded inputs; it does not rewrite
-the historical fact that the table was originally produced from an earlier
-input. The fabric relies on producers recording these assertions correctly.
-In this example market data is a strong dependency of the risk calculation,
-so its version constrains the consumer's selection.
+The supporting datasets still depend on `universe@7`. Their immediate input
+version has not changed, so the acknowledgement does not require new versions
+or revisions of those datasets. When validation resolves their transitive
+dependencies, it uses the latest known revision of that universe version.
+It can consequently establish agreement with `positions@101` and validate the
+new quantities using the existing supporting data. The universe's revised
+acceptance makes a new combination admissible without changing the universe,
+analytics, market-data, or reference-data values.
 
-The model extends this reasoning to consumers of multiple datasets with
-shared, transitive dependencies, such as market data, valuations, portfolio
-risk, and proposed trades. Each producer records its immediate accepted input
+This acknowledgement is an assertion by the universe builder that its retained
+output is suitable for the new desired positions. The supporting datasets
+retain their values, while validation runs on the new quantities before
+orders are created and sent.
+If a later positions update adds instrument C and requires a new universe
+version, the supporting publications must establish compatibility with that
+new version before the expanded selection is available to validation.
+
+The workflow also separates dependency relationships from execution triggers.
+The universe builder responds to desired positions, but need not change its
+output on every update. A market-data snapshot or analytics computation can
+publish new values on a timer while the universe remains unchanged. Each such
+publication records the universe version it accepted. These independently
+refreshed datasets need not share a publication time or version number to be
+coherent with respect to their declared dependencies. Any additional
+relationship, such as analytics consuming a particular market snapshot, must
+also be recorded if it is to constrain selection. Application-specific
+freshness requirements remain distinct from dependency coherence.
+
+The model extends this reasoning to consumers of multiple datasets with shared,
+transitive dependencies. Producers record their immediate accepted input
 versions. Consumers resolve those relationships to select a coherent
-combination, or *cut*, and retain their existing selections while an update
-cannot yet be reconciled. A dependency revision can make a newer cut
+combination, or *cut*. A dependency-only revision can make a newer cut
 admissible even when an intermediate dataset's value remains unchanged.
 
-The resulting coordination is expressed through dataset identities, local
-version histories, and dependency acceptance. It does not require comparing
-timestamps across producers or assigning all publications to a common clock.
-Local timestamps may still be useful for other purposes, but they do not
-establish coherence. This separation is the central idea of hgraph fabric:
-independently executing computations publish data and acceptance information,
-and consumers use that information to advance coherent views.
+Coordination is expressed through dataset identities, local version histories,
+and dependency acceptance. It does not require comparing timestamps across
+producers or assigning all publications to a common clock. The central idea of
+hgraph fabric is that independently executing computations publish both data
+and acceptance information, allowing consumers to advance coherent views
+without requiring every upstream computation to publish a new value.
