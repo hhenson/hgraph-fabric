@@ -1,7 +1,7 @@
 # hgraph-fabric
 
-A standalone, open-source project for developing the hgraph versioned
-dataflow fabric.
+A standalone, open-source implementation of **Revisioned Dataflow**, a model
+for distributed, data-centred computation.
 
 The concept connects independent computations through complete, versioned
 datasets. Lineage records describe which input versions a computation has

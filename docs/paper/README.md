@@ -1,10 +1,15 @@
-# hgraph fabric paper draft
+# Revisioned Dataflow paper draft
 
 Working statement:
 
 > A model for distributed, data-centred computation that maintains coherent
 > views of independently versioned datasets without requiring a globally
 > coordinated clock.
+
+**Revisioned Dataflow** names the computational model described by this paper.
+The **hgraph-fabric** package provides an implementation of that model. The
+model's definitions and semantics are independent of the implementation's
+runtime, storage, and transport choices.
 
 The paper is being developed as a sequence of Markdown sections. These files
 are the working manuscript; a more formal publication format will follow.

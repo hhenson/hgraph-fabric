@@ -115,11 +115,12 @@ input. The arrival of new analytics alone provides no evidence that the market
 data and reference-data paths have caught up. Waiting for an arbitrary amount
 of time provides no such evidence either.
 
-To address this failure, hgraph fabric records which input publications each
-computation has accepted. A consumer follows these records across its input
-paths and checks agreement at their common upstream datasets. It admits a new
-combination only when that agreement is established; otherwise, it retains its
-previous coherent selection while the remaining computations catch up.
+To address this failure, we introduce **Revisioned Dataflow**, a model that
+records which input publications each computation has accepted. A consumer
+follows these records across its input paths and checks agreement at their
+common upstream datasets. It admits a new combination only when that agreement
+is established; otherwise, it retains its previous coherent selection while
+the remaining computations catch up.
 
 This motivates giving each published dataset value an identity. A **dataset
 ID** names a dataset, such as desired positions or the trading universe. A
@@ -180,10 +181,10 @@ for the new positions. Requiring a new universe data version solely to convey
 this fact would give unchanged data a new identity and needlessly change the
 input version seen by each supporting-data component.
 
-hgraph fabric represents this acknowledgement with a **revision**. A revision
-records the input versions accepted by the computation producing or retaining
-a particular data version. A changed dependency record can therefore advance
-the revision while leaving the output data version unchanged.
+Revisioned Dataflow represents this acknowledgement with a **revision**. A
+revision records the input versions accepted by the computation producing or
+retaining a particular data version. A changed dependency record can therefore
+advance the revision while leaving the output data version unchanged.
 
 We can now introduce notation for these identities. `dataset_id@version`
 denotes a data version: `positions@100` means version 100 of the desired
@@ -310,3 +311,7 @@ select a coherent combination, or **cut**, across their inputs. Data versions
 identify values; revisions allow acceptance to advance without inventing new
 values. Dependency relationships establish coherence without requiring a
 globally coordinated clock or a common publication schedule.
+
+The **hgraph-fabric** package provides an implementation of Revisioned Dataflow.
+The model described here is independent of its runtime, storage, and transport
+choices.
