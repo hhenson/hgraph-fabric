@@ -14,6 +14,8 @@ are the working manuscript; a more formal publication format will follow.
 
 The abstract captures the agreed framing. The introduction motivates the model
 with a desired-positions, trading-universe, validation, and order workflow.
+Repeated workflow diagrams show the information available in each scenario
+before introducing the identities and revision records needed to reconcile it.
 Formal guarantees, comparison with related work, and evaluation remain to be
 developed; the draft does not claim that those results have already been
 established.

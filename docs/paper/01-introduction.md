@@ -1,13 +1,13 @@
 # Introduction
 
 Risk and batch trading computations bring together datasets produced by
-independently executing components. A strategy publishes desired positions;
+independently executing components. A strategy submits desired positions;
 other components determine the instruments required, load supporting data,
-validate the proposed positions, and construct orders. These components can
+validate the proposed positions, and construct orders. These components may
 run on different schedules and take different amounts of time. The downstream
-computation needs to know which versions of their outputs can be used together.
+computation needs to know which publications can be used together.
 
-Consider the following simplified batch trading workflow:
+Consider this simplified workflow:
 
 1. A strategy submits its desired positions.
 2. The trading universe is updated if necessary.
@@ -16,112 +16,280 @@ Consider the following simplified batch trading workflow:
 4. The desired positions are validated using those datasets.
 5. Following successful validation, orders are created and sent.
 
-The dataflow is shown below. Arrows run from an input to the computation that
-consumes it. Analytics and market-data snapshots may also be refreshed on
-independent timers; those triggers are omitted from the diagram.
+The following pictures repeat this workflow to show different information
+flows. Solid arrows run from a dataset to a computation that consumes it.
+Blue marks newly published data and its path; purple marks an acknowledgement
+without new data; amber marks waiting; and green marks readiness to proceed.
+Grey datasets are unchanged or reused. Text labels also identify the relevant
+changes, so the distinction does not depend on colour alone. Each scenario
+starts from the initial state below unless stated otherwise.
 
 ```mermaid
 flowchart LR
-    P[Desired positions] --> U[Trading universe]
-    U --> A[Analytics]
-    U --> M[Market-data snapshot]
-    U --> R[Instrument reference data]
-    P --> V[Validation]
+    P["Desired positions<br/>A: 100; B: 50"]
+    U["Trading universe<br/>A, B"]
+    A["Analytics<br/>for A, B"]
+    M["Market snapshot<br/>for A, B"]
+    R["Reference data<br/>for A, B"]
+    V["Validation<br/>Ready"]
+    O["Create and send<br/>orders"]
+    P --> U
+    U --> A
+    U --> M
+    U --> R
+    P --> V
     A --> V
     M --> V
     R --> V
-    V --> O[Create and send orders]
+    V --> O
+    classDef unchanged fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    classDef changed fill:#dbeafe,stroke:#2563eb,color:#111827,stroke-width:2px;
+    classDef waiting fill:#fef3c7,stroke:#b45309,color:#111827,stroke-width:2px;
+    classDef ready fill:#dcfce7,stroke:#15803d,color:#111827,stroke-width:2px;
+    classDef acknowledgement fill:#f3e8ff,stroke:#7e22ce,color:#111827,stroke-width:2px;
+    class P,U,A,M,R unchanged;
+    class V,O ready;
+    linkStyle 8 stroke:#15803d,stroke-width:3px;
 ```
 
-Desired positions reach validation by more than one path. They are a direct
-input, and they also determine the universe on which the supporting datasets
-depend. For example, instrument reference data depends on the universe, which
-in turn depends on desired positions. Validation must reconcile its direct
-positions input with the positions accepted along these indirect paths.
+*Figure 1. An initial coherent view: desired positions request 100 units of A
+and 50 units of B, and all supporting datasets cover the required universe.*
 
-Versioning each dataset makes individual publications identifiable, but does
-not by itself establish which publications form a coherent view. Suppose a
-strategy adds an instrument to its desired positions. The new positions may
-arrive at validation before the universe and supporting datasets have been
-updated. Taking the latest available value of each dataset could combine
-positions for the expanded universe with reference data or analytics loaded
-for the preceding universe. Explicit dependency records allow validation to
-retain its preceding coherent selection until compatible inputs are available.
+The positions reach validation directly and indirectly. The indirect paths
+pass through the universe and the three supporting datasets. In particular,
+reference data depends on the universe, which depends on desired positions.
+These paths must agree about which positions have been accepted.
 
-A subtler case occurs when the desired positions change without changing the
-universe. Suppose `positions@100` requests 100 units of A and 50 units of B.
-The universe builder publishes `universe@7`, containing A and B, and records
-that it accepted `positions@100`. The analytics, market-data, and reference-data
-publications each identify `universe@7` as an input. Validation can combine
-these datasets with `positions@100`.
+## When the universe changes
 
-The strategy then publishes `positions@101`, changing the requested quantity
-of A to 120 while retaining the same instruments. The universe builder
-processes the update and determines that A and B still form the required
-universe. No new universe value is needed. Nor does this positions update
-require reloading instrument reference data merely to reproduce the same
-universe coverage.
+Suppose the strategy adds instrument C. Its new positions reach validation
+quickly, but updating the universe and loading supporting data takes longer.
+The next picture captures an intermediate state: the universe and analytics
+include C, while the market snapshot and reference data still cover A and B.
 
-The universe's data version alone cannot distinguish two states: the builder
-has not yet processed the new desired positions, or it has processed them and
-found that the existing universe remains suitable. If no acknowledgement is
-recorded, validation cannot establish agreement between `positions@101` and
-the older positions dependency reached through the supporting datasets.
-Republishing the unchanged universe as a new data version would communicate
-progress by introducing a new value identity where none is needed.
+```mermaid
+flowchart LR
+    P["New desired positions<br/>A, B and C"]
+    U["New universe<br/>A, B, C"]
+    A["New analytics<br/>for A, B, C"]
+    M["Earlier market snapshot<br/>for A, B"]
+    R["Earlier reference data<br/>for A, B"]
+    V["Validation<br/>New batch waiting"]
+    O["Orders<br/>New batch waiting"]
+    P --> U
+    U --> A
+    U --> M
+    U --> R
+    P --> V
+    A --> V
+    M --> V
+    R --> V
+    V --> O
+    classDef unchanged fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    classDef changed fill:#dbeafe,stroke:#2563eb,color:#111827,stroke-width:2px;
+    classDef waiting fill:#fef3c7,stroke:#b45309,color:#111827,stroke-width:2px;
+    classDef ready fill:#dcfce7,stroke:#15803d,color:#111827,stroke-width:2px;
+    classDef acknowledgement fill:#f3e8ff,stroke:#7e22ce,color:#111827,stroke-width:2px;
+    class P,U,A changed;
+    class M,R unchanged;
+    class V,O waiting;
+    linkStyle 0,1,4,5 stroke:#2563eb,stroke-width:3px;
+```
 
-hgraph fabric separates a **data version** from a **dependency revision**.
-A version identifies an immutable published dataset. A revision records the
-input versions accepted by the computation producing or retaining that dataset.
-The universe builder can therefore publish `universe@7/r1`, acknowledging
-`positions@101` while retaining the data in `universe@7`.
+*Figure 2. New positions and analytics have arrived, but the supporting data
+is not yet compatible with the expanded universe.*
 
-| State | Latest desired positions | Universe record | Positions accepted by the universe | Positions admissible with the existing supporting datasets |
-| --- | --- | --- | --- | --- |
-| Initial coherent view | `positions@100`: A=100, B=50 | `universe@7/r0`: A, B | `positions@100` | `positions@100` |
-| Strategy changes quantities | `positions@101`: A=120, B=50 | `universe@7/r0`: A, B | `positions@100` | `positions@100` |
-| Universe builder acknowledges no membership change | `positions@101`: A=120, B=50 | `universe@7/r1`: A, B | `positions@101` | `positions@101` |
+Taking the latest publication from each input would combine data from different
+stages of the update. Waiting for an arbitrary amount of time does not establish
+that the loaders have completed. Validation needs to identify which universe
+each supporting publication has accepted, and which positions that universe
+has accepted. Once the remaining publications establish agreement along these
+paths, the new batch can proceed. Until then, the consumer retains its previous
+coherent selection.
 
-Here, `r1` denotes revision 1 within data version 7. Version numbers are local
-to each dataset; 101 and 7 are not positions on a shared clock.
+This motivates giving each published dataset value an identity. A **dataset
+ID** names a dataset, such as desired positions or the trading universe. A
+**data version** identifies one immutable published value of that dataset.
+A **dependency record** identifies the input versions accepted by the producer
+of an output. These records let a consumer check agreement along the different
+paths rather than infer completion from arrival order or elapsed time.
+
+## When the universe does not change
+
+Return to the initial universe containing A and B. The strategy now changes
+only its requested quantity of A, from 100 to 120. The universe builder
+processes the positions and finds that the existing universe remains suitable.
+No new universe value is needed, so the supporting datasets do not need to be
+reloaded merely to reproduce the same instrument coverage.
+
+```mermaid
+flowchart LR
+    P["New desired positions<br/>A: 120; B: 50"]
+    U["Trading universe<br/>Still A, B"]
+    A["Analytics<br/>for A, B"]
+    M["Market snapshot<br/>for A, B"]
+    R["Reference data<br/>for A, B"]
+    V["Validation<br/>Acceptance unknown"]
+    O["Orders<br/>New batch waiting"]
+    P --> U
+    U --> A
+    U --> M
+    U --> R
+    P --> V
+    A --> V
+    M --> V
+    R --> V
+    V --> O
+    classDef unchanged fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    classDef changed fill:#dbeafe,stroke:#2563eb,color:#111827,stroke-width:2px;
+    classDef waiting fill:#fef3c7,stroke:#b45309,color:#111827,stroke-width:2px;
+    classDef ready fill:#dcfce7,stroke:#15803d,color:#111827,stroke-width:2px;
+    classDef acknowledgement fill:#f3e8ff,stroke:#7e22ce,color:#111827,stroke-width:2px;
+    class P changed;
+    class U,A,M,R unchanged;
+    class V,O waiting;
+    linkStyle 0,4 stroke:#2563eb,stroke-width:3px;
+```
+
+*Figure 3. New quantities reach validation, but an unchanged universe value
+alone does not reveal whether those positions have been processed.*
+
+From downstream, the absence of a new universe publication is ambiguous. The
+builder might still be processing the new positions, or it might have finished
+and found no change. Data versions distinguish different published values,
+but cannot on their own distinguish these two states of computational progress.
+Validation needs an acknowledgement that the retained universe is suitable
+for the new positions. Requiring a new universe data version solely to convey
+this fact would give unchanged data a new identity and needlessly change the
+input version seen by each supporting-data component.
+
+hgraph fabric represents this acknowledgement with a **revision**. A revision
+records the input versions accepted by the computation producing or retaining
+a particular data version. A changed dependency record can therefore advance
+the revision while leaving the output data version unchanged.
+
+We can now introduce notation for these identities. `dataset_id@version`
+denotes a data version: `positions@100` means version 100 of the desired
+positions dataset. Appending `/rN` identifies a revision of that version, so
+`universe@7/r1` means revision 1 of universe version 7. Revision counts start
+at zero within a data version. Version numbers are local to their dataset;
+100 and 7 are not positions on a shared clock.
+
+In the initial state, `universe@7/r0` accepts `positions@100`. After the
+quantity change, the builder publishes `universe@7/r1`, accepting
+`positions@101` while retaining the same universe data. The next picture
+shows how that additional information permits progress.
+
+```mermaid
+flowchart LR
+    P["New desired positions<br/>A: 120; B: 50"]
+    U["Same universe: A, B<br/>New positions accepted"]
+    A["Analytics<br/>for A, B"]
+    M["Market snapshot<br/>for A, B"]
+    R["Reference data<br/>for A, B"]
+    V["Validation<br/>Ready"]
+    O["Create and send<br/>orders"]
+    P --> U
+    U --> A
+    U --> M
+    U --> R
+    P --> V
+    A --> V
+    M --> V
+    R --> V
+    V --> O
+    U -. "Revision metadata" .-> V
+    classDef unchanged fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    classDef changed fill:#dbeafe,stroke:#2563eb,color:#111827,stroke-width:2px;
+    classDef waiting fill:#fef3c7,stroke:#b45309,color:#111827,stroke-width:2px;
+    classDef ready fill:#dcfce7,stroke:#15803d,color:#111827,stroke-width:2px;
+    classDef acknowledgement fill:#f3e8ff,stroke:#7e22ce,color:#111827,stroke-width:2px;
+    class P changed;
+    class U acknowledgement;
+    class A,M,R unchanged;
+    class V,O ready;
+    linkStyle 0,4 stroke:#2563eb,stroke-width:3px;
+    linkStyle 8 stroke:#15803d,stroke-width:3px;
+    linkStyle 9 stroke:#7e22ce,stroke-width:3px;
+```
+
+*Figure 4. A new universe revision acknowledges the new positions. Validation
+can use the unchanged supporting datasets with the new quantities. The dashed
+purple arrow shows dependency metadata consulted during resolution; it is not
+an additional direct dataset input to validation.*
 
 The supporting datasets still depend on `universe@7`. Their immediate input
-version has not changed, so the acknowledgement does not require new versions
-or revisions of those datasets. When validation resolves their transitive
-dependencies, it uses the latest known revision of that universe version.
-It can consequently establish agreement with `positions@101` and validate the
-new quantities using the existing supporting data. The universe's revised
-acceptance makes a new combination admissible without changing the universe,
-analytics, market-data, or reference-data values.
+version has not changed, so they need neither new data versions nor new
+revisions to reflect this acknowledgement. When validation follows their
+recorded dependencies, it resolves the latest known revision of that universe
+version and finds acceptance of `positions@101`. The direct and indirect
+positions paths can now agree. Validation can process the new quantities,
+after which orders can be created and sent.
 
-This acknowledgement is an assertion by the universe builder that its retained
-output is suitable for the new desired positions. The supporting datasets
-retain their values, while validation runs on the new quantities before
-orders are created and sent.
-If a later positions update adds instrument C and requires a new universe
-version, the supporting publications must establish compatibility with that
-new version before the expanded selection is available to validation.
+The universe builder is asserting that its retained output remains suitable
+for the new positions. It is not claiming that the supporting computations
+ran again. This separation allows consistency to advance through unchanged
+intermediate data.
 
-The workflow also separates dependency relationships from execution triggers.
-The universe builder responds to desired positions, but need not change its
-output on every update. A market-data snapshot or analytics computation can
-publish new values on a timer while the universe remains unchanged. Each such
-publication records the universe version it accepted. These independently
-refreshed datasets need not share a publication time or version number to be
-coherent with respect to their declared dependencies. Any additional
-relationship, such as analytics consuming a particular market snapshot, must
-also be recorded if it is to constrain selection. Application-specific
-freshness requirements remain distinct from dependency coherence.
+## When a timer refreshes supporting data
 
-The model extends this reasoning to consumers of multiple datasets with shared,
-transitive dependencies. Producers record their immediate accepted input
-versions. Consumers resolve those relationships to select a coherent
-combination, or *cut*. A dependency-only revision can make a newer cut
-admissible even when an intermediate dataset's value remains unchanged.
+Changes do not always originate in desired positions. A market-data snapshot
+can refresh on a timer while the positions and universe remain unchanged.
+Analytics can likewise be refreshed independently. The next picture shows a
+market-data refresh against the initial universe.
 
-Coordination is expressed through dataset identities, local version histories,
-and dependency acceptance. It does not require comparing timestamps across
-producers or assigning all publications to a common clock. The central idea of
-hgraph fabric is that independently executing computations publish both data
-and acceptance information, allowing consumers to advance coherent views
-without requiring every upstream computation to publish a new value.
+```mermaid
+flowchart LR
+    P["Desired positions<br/>A: 100; B: 50"]
+    U["Trading universe<br/>A, B"]
+    A["Analytics<br/>for A, B"]
+    M["New market snapshot<br/>Same universe: A, B"]
+    R["Reference data<br/>for A, B"]
+    V["Validation<br/>Ready"]
+    O["Order creation<br/>and sending"]
+    P --> U
+    U --> A
+    U --> M
+    U --> R
+    P --> V
+    A --> V
+    M --> V
+    R --> V
+    V --> O
+    M -. "Timer refresh" .-> M
+    classDef unchanged fill:#f3f4f6,stroke:#6b7280,color:#111827;
+    classDef changed fill:#dbeafe,stroke:#2563eb,color:#111827,stroke-width:2px;
+    classDef waiting fill:#fef3c7,stroke:#b45309,color:#111827,stroke-width:2px;
+    classDef ready fill:#dcfce7,stroke:#15803d,color:#111827,stroke-width:2px;
+    classDef acknowledgement fill:#f3e8ff,stroke:#7e22ce,color:#111827,stroke-width:2px;
+    class M changed;
+    class P,U,A,R,O unchanged;
+    class V ready;
+    linkStyle 6 stroke:#2563eb,stroke-width:3px;
+    linkStyle 9 stroke:#2563eb,stroke-width:3px;
+```
+
+*Figure 5. A timer produces a new market snapshot for the same universe. The
+other inputs can be reused when their dependency records agree. The dashed
+blue arrow is an execution trigger, not a dataset dependency.*
+
+The refreshed snapshot records the universe version it accepted. If that
+version agrees with the other inputs, the consumer can admit the snapshot
+without waiting for every component to publish again. Conversely, a new
+snapshot prepared for a different universe must be reconciled with the other
+inputs before it can be selected. The diagram shows availability for
+validation; the application's scheduling determines when it constructs and
+sends an order batch.
+
+The simplified example has no dependency between analytics and the market
+snapshot. If analytics consumes a particular market snapshot, that relationship
+must also be recorded and checked. Application-specific freshness requirements
+are separate from agreement about dependencies.
+
+Together, these cases motivate **version management** that represents both
+published data and computational acceptance. Each producer records its
+immediate accepted input versions. Consumers follow those relationships to
+select a coherent combination, or **cut**, across their inputs. Data versions
+identify values; revisions allow acceptance to advance without inventing new
+values. Dependency relationships establish coherence without requiring a
+globally coordinated clock or a common publication schedule.
