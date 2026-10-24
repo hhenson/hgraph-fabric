@@ -1,4 +1,6 @@
 """Conflict-path refresh, cleanup and coordinated delivery regressions."""
+from adversarial_cases import current_choices
+
 from itertools import permutations, product
 import unittest
 from unittest.mock import patch
@@ -51,7 +53,7 @@ class ConflictTrackerReview(unittest.TestCase):
                 update = history.add("middle", 100, 1, dependencies=() if omission else (("x", 2),))
                 self.assertEqual(manager.apply_update(update), set() if counts else {("a", 9000), ("b", 9000)})
                 self.assertEqual(current_cut(manager), {key: history.heads[key] for key in order})
-                self.assertTrue(history.consistent(current_cut(manager)))
+                self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
                 expected_index = {}
                 for key, sub in manager._subscriptions.items():
                     for revision in {sub.current_revision, sub.latest_revision}:
@@ -83,9 +85,11 @@ class ConflictTrackerReview(unittest.TestCase):
             self.assertEqual(manager.apply_update(history.add("middle", 100, 1, dependencies=(("x", 2),))), set())
         compare.assert_not_called()
         self.assertEqual(current_cut(manager), before)
-        # Refresh has changed the trees without moving roots. The next actual
-        # resolution must revalidate them; the gate does not certify this state.
-        self.assertFalse(history.consistent(before))
+        # Latest expansions disagree, while the committed intermediate choices
+        # remain coherent until another complete proposal is accepted.
+        self.assertFalse(history.consistent(before, {key: {} for key in before}))
+        self.assertTrue(history.consistent(before, {key: sub.current_dependency_revisions
+                                                  for key, sub in manager._subscriptions.items()}))
         self.assertEqual(manager._dirty_subscriptions, {"a", "b"})
 
     def test_conflict_tracker_wakes_a_dependent_downgraded_by_an_earlier_comparison(self):
@@ -170,13 +174,14 @@ class ConflictTrackerReview(unittest.TestCase):
             return [manager.apply_update(update) for manager in managers]
 
         self.assertEqual(deliver(history.add("middle", 100, 1, dependencies=(("x", 2),))), [set(), set()])
-        self.assertEqual(deliver(history.add("independent", 200)), [set(), set()])
+        self.assertEqual(deliver(history.add("independent", 200)), [{("independent", 200)}] * 2)
         for manager in managers:
-            self.assertEqual(manager._subscriptions["independent"].current_revision, ("independent", 100, 0))
+            self.assertEqual(manager._subscriptions["independent"].current_revision, ("independent", 200, 0))
+            self.assertEqual(manager._subscriptions["a"].current_dependency_revisions[("middle", 100)], ("middle", 100, 0))
         self.assertEqual(deliver(history.add("b", 200, dependencies=(("x", 2),))),
-                         [{("b", 200), ("independent", 200)}] * 2)
+                         [{("b", 200)}] * 2)
         for manager in managers:
-            self.assertTrue(history.consistent(current_cut(manager)))
+            self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_explicit_cleanup_is_idempotent_and_keeps_active_waiters(self):
         history, cache, manager = waiting()

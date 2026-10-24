@@ -12,7 +12,7 @@ from unittest.mock import patch
 from hgraph_fabric.consistent_cut import NoConsistentCutError, find_consistent_cut
 from hgraph_fabric.data_subscription_graph import DataSubscriptionGraph
 from hgraph_fabric.data_subscription_manager import DataSubscriptionManager
-from adversarial_cases import History, HistoryCache, current_cut
+from adversarial_cases import History, HistoryCache, current_cut, current_choices
 
 
 class Stream:
@@ -38,6 +38,13 @@ class Stream:
                     graph = sub.revision(revision, self.cache)
                     self.case.assertEqual(dict(graph.nodes()) | {key: revision[1]}, nodes)
                     dependencies.update((node, version) for node, version in nodes.items() if node != key)
+                # The index also retains paths selected from older intermediate
+                # revisions in the committed cut.
+                selected = self.history.nodes(sub.current_revision, sub.current_dependency_revisions)
+                self.case.assertEqual(dict(sub.current(self.cache).nodes()) | {key: sub.current_revision[1]}, selected)
+                self.case.assertEqual(set(sub.current_dependency_revisions),
+                                      {(name, version) for name, version in selected.items() if name != key})
+                dependencies.update((node, version) for node, version in selected.items() if node != key)
                 self.case.assertEqual(manager._subscription_dependencies[key], dependencies)
                 for version in dependencies:
                     expected.setdefault(version, set()).add(key)
@@ -75,10 +82,10 @@ class Stream:
             self.case.assertEqual(result, {after[key][:2] for key in previous
                                            if after[key][1] > previous[key][1]})
             if after != previous:
-                self.case.assertTrue(self.history.consistent(after), (update, previous, after))
+                self.case.assertTrue(self.history.consistent(after, current_choices(manager)), (update, previous, after))
             latest = {key: sub.latest_revision for key, sub in manager._subscriptions.items()}
             driver_can_advance = (update.id not in previous or latest[update.id] > previous[update.id])
-            if can_search and driver_can_advance and self.history.consistent(latest):
+            if can_search and driver_can_advance and self.history.consistent(latest, {key: {} for key in latest}):
                 self.case.assertEqual(after, latest)
 
             # A dependency duplicate cannot wake a search. A root already at
@@ -93,7 +100,7 @@ class Stream:
             if update.id not in after or after[update.id] == latest[update.id]:
                 self.case.assertEqual(duplicate_cut, after)
             if duplicate_cut != after:
-                self.case.assertTrue(self.history.consistent(duplicate_cut))
+                self.case.assertTrue(self.history.consistent(duplicate_cut, current_choices(manager)))
         self.case.assertTrue(all(result == results[0] for result in results))
         self.check()
         return results[0]
@@ -238,9 +245,12 @@ class DeepTransitionTests(unittest.TestCase):
                     self.assertEqual(stream.publish(history.add("n", 5003, 1, dependencies=(("x", 7),))),
                                      {("a", 9000), ("b", 9000)})
                     self.assertEqual(stream.managers[0]._conflicts, {})
-                    # Removal cleans the reverse index too; a later N update
-                    # cannot trigger work on the now unrelated roots.
+                    # The committed graph still uses N until another cut is
+                    # selected. Retire it after committing the newer M path.
                     stream.publish(history.add("m", 100, 2, dependencies=(("x", 7),)))
+                    self.assertIn(("n", 5003), stream.managers[0]._dependents)
+                    for manager in stream.managers:
+                        manager.get_consistent_cut()
                     self.assertNotIn(("n", 5003), stream.managers[0]._dependents)
                     with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut") as compare:
                         stream.publish(history.add("n", 5003, 2))
@@ -377,13 +387,13 @@ class DeepTransitionTests(unittest.TestCase):
                 results = {}
                 for index in delivery:
                     results[index] = managers[index].apply_update(update)
-                self.assertEqual(results, {0: {("a", 9000), ("b", 9000)}, 1: set(), 2: set()})
+                self.assertEqual(results, {0: set(), 1: set(), 2: set()})
                 for manager, roots in zip(managers, groups):
                     self.assertEqual(current_cut(manager), {root: history.heads[root] for root in roots})
-                    self.assertTrue(history.consistent(current_cut(manager)))
+                    self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
                     for sub in manager._subscriptions.values():
                         self.assertEqual(dict(sub.current(cache).nodes()) | {sub.data_id: sub.current_revision[1]},
-                                         history.nodes(sub.current_revision))
+                                         history.nodes(sub.current_revision, sub.current_dependency_revisions))
                 # The one-dependent manager still needs to validate its dirty
                 # A tree when its independent root next advances.
                 update = history.add("independent", 5003)
@@ -438,7 +448,7 @@ class DeepTransitionTests(unittest.TestCase):
         fresh = DataSubscriptionManager(cache)
         fresh.add_subscriptions(("a", "b"))
         fresh.get_consistent_cut()
-        self.assertTrue(history.consistent(current_cut(fresh)))
+        self.assertTrue(history.consistent(current_cut(fresh), current_choices(fresh)))
         self.assertEqual(current_cut(fresh), exact)
 
     def test_refreshed_middle_probe_does_not_prune_the_matching_half(self):
@@ -464,7 +474,7 @@ class DeepTransitionTests(unittest.TestCase):
         fresh = DataSubscriptionManager(cache)
         fresh.add_subscriptions(("a", "b"))
         fresh.get_consistent_cut()
-        self.assertTrue(history.consistent(current_cut(fresh)))
+        self.assertTrue(history.consistent(current_cut(fresh), current_choices(fresh)))
         self.assertEqual(current_cut(fresh), exact)
 
     def test_refreshed_counts_choose_newest_exact_before_newest_omission(self):

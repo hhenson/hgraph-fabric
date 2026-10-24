@@ -13,19 +13,22 @@ The package currently provides identity aliases, frozen revision metadata,
 a lazy data cache with abstract storage readers and writers, and a directed dependency
 edge graph with version checks and node queries. The subscription graph
 builds and retains full strong-dependency graphs breadth first, using the cache's
-latest-revision lookup for each specific dependency version. Each subscription
+latest-revision lookup for each specific dependency version as the initial candidate. Each subscription
 tracks `latest_revision`, `proposed_revision` and `current_revision` independently.
 `proposed_graph(cache)` loads the proposed tree without pruning retained history;
-weak dependencies are excluded. Retained trees record the exact dependency
-revisions used to build them. Reuse checks those revisions, so the same root
-revision can refresh its ancestors when a referenced version gets a newer count.
+weak dependencies are excluded. Search can select earlier revision records
+within each referenced data version, recursively, before changing a root.
+`current(cache)` retains the committed graph; `current_dependency_revisions`
+reports its chosen intermediate records. Notifications refresh discovery caches
+and provide candidates for another attempt, without overwriting those choices.
 The explicit root revision and dependency data versions stay pinned.
 `DataSubscriptionManager(cache)` registers roots with `add_subscription(data_id)`
 or `add_subscriptions(data_ids)`, loading their latest trees.
 
 `get_consistent_cut()` initializes proposals to latest and builds a consistent
 prefix one subscription at a time using `find_consistent_cut`. That pairwise
-function compares proposed selections. If either proposal moves backwards, its
+function compares proposed selections and stages successful intermediate
+choices. If either the root revision or its dependency choices change, its
 comparisons within the prefix are queued again. Only after the complete set is
 consistent are proposals copied to current. Before committing, every proposed
 full tree is loaded, including a single subscription with no pair comparisons.
@@ -64,8 +67,8 @@ caller and are fatal to processing; recovery and replay after errors are not par
 of this contract.
 
 Tree refresh and cut advancement are separate. When the gate skips a search,
-root selections stay unchanged; refreshed current trees are marked for comparison
-at the next resolution, rather than assumed consistent from earlier checks.
+committed roots and their resolved graphs remain unchanged. The next attempt
+starts with latest candidates and compares changed intermediate choices too.
 With an established cut, it sets proposals to latest and first compares the
 updated item against every other item, rechecking earlier matches if its proposal
 changes. If that proposal drops to its committed current (or below), it stops
@@ -86,20 +89,29 @@ version advanced, including newly selected subscriptions and waiting peers.
 Revision-count changes can advance the cut but do not indicate new data and are
 excluded from the returned set.
 
-The pairwise search keeps the lagging subscription fixed, follows revision-zero
-links across sparse versions, and examines admissible revisions newest first.
-The first exact match returns immediately. The newest consistent omission is
-remembered, but used only after ruling out every exact match within the bounds.
-This can require a linear number of tree comparisons: refreshed descendants can
-break the ordering that binary pruning would require.
-If one subscription's root occurs in the other tree, only that root version
-needs to match; otherwise all common nodes are checked. Subscriptions record
-dependency changes while those dependencies remain present. Exact matches
-take priority over missing-dependency candidates. If the normal search cannot
-align either history with the fixed side, an exceptional fallback searches both
-histories within their proposed bounds. It preserves those matching preferences
-and does not change selections. This fallback can require a quadratic number of
-tree comparisons; successful normal comparisons do not enter it.
+The pairwise search first holds both root revisions fixed and searches
+intermediate revision choices within their referenced data versions. For example,
+`A -> M@100` can select `M@100/r1 -> X@3` to agree with another root consuming
+`X@3`, even when M's latest record is `/r3 -> X@7`. Choices are retained with
+the proposal and committed together with the roots. Later comparisons in the
+same attempt cannot raise an intermediate count already lowered by a comparison.
+
+Within one version, a search-local index checks immutable immediate-dependency
+membership and ordering. For stable, ordered records, binary lower/upper bounds
+narrow the counts that can match constrained immediate inputs. Creating the index
+reads the records; this does not claim logarithmic storage reads. Changing
+membership or unordered records retain the general newest-first search.
+Descendant expansions through latest revisions are not used as ordering keys.
+
+Only after intermediate resolution fails does root history search follow
+revision-zero links across sparse versions. Exact alignments take precedence over
+consistent omissions; both sides' intermediate choices may need to change.
+Every shared data version must agree, including upstream nodes when one root
+occurs in the other graph. Once that containment is coherent, it counts as an
+exact alignment even if an old shared descendant is no longer present. If the
+normal search cannot align roots with one side fixed, a bounded fallback searches
+both root histories. Root combinations and intermediate choices can require
+exhaustive search; no globally newest cut or logarithmic overall cost is claimed.
 
 The cache's `latest(data_id)` returns a revision ID. Historical version lookup
 starts there and follows the `(version, revision_count)` pair in

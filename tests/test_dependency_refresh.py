@@ -1,4 +1,6 @@
 """Soft conflict subscriptions refresh exact versions and wake blocked roots."""
+from adversarial_cases import current_choices
+
 from itertools import permutations
 import unittest
 from unittest.mock import patch
@@ -39,7 +41,7 @@ class DependencyRefreshTests(unittest.TestCase):
                     self.assertEqual(manager._dependents[("middle", 100)], {"a", "b"})
                     update = history.add("middle", 100, 1, dependencies=(("x", 2),))
                     self.assertEqual(manager.apply_update(update), {("a", 9000), ("b", 9000)})
-                    self.assertTrue(history.consistent(current_cut(manager)))
+                    self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
                     self.assertEqual(manager._conflicts, {})
                     self.assertNotIn(("x", 1), manager._dependents)
                     self.assertEqual(manager._dependents[("x", 2)], {"a", "b", "peer"})
@@ -77,10 +79,10 @@ class DependencyRefreshTests(unittest.TestCase):
         self.assertEqual(manager.apply_update(history.add(
             "outer", 100, 1, dependencies=(("middle", 200),)
         )), {("a", 200), ("b", 200)})
-        self.assertTrue(history.consistent(current_cut(manager)))
+        self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
         self.assertEqual(manager._conflicts, {})
 
-    def test_all_dependents_at_latest_refresh_without_search(self):
+    def test_all_dependents_at_latest_retain_committed_choices_without_search(self):
         history, cache, manager = self.waiting()
         manager.apply_update(history.add("middle", 100, 1, dependencies=(("x", 2),)))
         before = current_cut(manager)
@@ -89,7 +91,7 @@ class DependencyRefreshTests(unittest.TestCase):
             self.assertEqual(manager.apply_update(history.add("middle", 100, 2, dependencies=(("x", 2),))), set())
         compare.assert_not_called()
         self.assertEqual(current_cut(manager), before)
-        self.assertIsNot(manager._subscriptions["a"].current(cache), graphs["a"])
+        self.assertIs(manager._subscriptions["a"].current(cache), graphs["a"])
         self.assertIs(manager._subscriptions["peer"].current(cache), graphs["peer"])
 
     def test_other_version_and_unrelated_branch_do_not_wake_conflict(self):
@@ -112,7 +114,7 @@ class DependencyRefreshTests(unittest.TestCase):
             manager.apply_update(history.add("extra", 100, 1))
         compare.assert_not_called()
 
-    def test_refreshed_current_is_not_treated_as_previously_validated(self):
+    def test_new_proposal_resolves_refreshed_dependencies_without_blocking_independent(self):
         history = History()
         history.add("x", 1)
         history.add("x", 2)
@@ -126,17 +128,18 @@ class DependencyRefreshTests(unittest.TestCase):
         manager.add_subscriptions(("a", "b", "peer", "independent"))
         manager.get_consistent_cut()
         before = current_cut(manager)
-        # All roots are latest: honour the no-search gate, but remember that
-        # refreshing these current trees invalidates their previous pair checks.
+        # Keep the committed expansion. The next proposal starts from latest
+        # but can choose the older middle revision to retain X@1 agreement.
         manager.apply_update(history.add("middle", 100, 1, dependencies=(("x", 2),)))
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", wraps=find_consistent_cut) as compare:
-            self.assertEqual(manager.apply_update(history.add("independent", 9000)), set())
-        self.assertEqual(current_cut(manager), before)
+            self.assertEqual(manager.apply_update(history.add("independent", 9000)), {("independent", 9000)})
+        self.assertEqual(current_cut(manager), before | {"independent": ("independent", 9000, 0)})
+        self.assertEqual(manager._subscriptions["a"].current_dependency_revisions[("middle", 100)], ("middle", 100, 0))
         self.assertTrue(any({args[0].data_id, args[1].data_id} == {"a", "peer"}
                             for args, _ in compare.call_args_list))
         self.assertEqual(manager.apply_update(history.add("peer", 9000, dependencies=(("x", 2),))),
-                         {("peer", 9000), ("independent", 9000)})
-        self.assertTrue(history.consistent(current_cut(manager)))
+                         {("peer", 9000)})
+        self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_failed_refresh_propagates_without_changing_selections(self):
         history, cache, manager = self.waiting()
@@ -179,7 +182,7 @@ class DependencyRefreshTests(unittest.TestCase):
         self.assertEqual(manager.apply_update(history.add("middle", 100, 1, dependencies=(("x", 2),))),
                          {("b", 9000)})
         self.assertEqual(manager._subscriptions["a"].current_revision, ("a", 100, 0))
-        self.assertTrue(history.consistent(current_cut(manager)))
+        self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_dependency_refresh_can_advance_counts_without_reporting_new_data(self):
         history = History()

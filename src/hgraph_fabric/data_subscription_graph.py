@@ -2,6 +2,7 @@ from collections import deque
 
 from .data_cache import DataCache
 from .data_graph import DataEdgeGraph
+from .dependency_resolution import DependencyResolution, RevisionSearch
 from .data_structures import DataId, DataRevisionId, DataVersionId
 
 
@@ -28,6 +29,9 @@ class DataSubscriptionGraph:
         self.proposed_revision = None
         self._current_revision = None
         self._revision_graphs = {}
+        self._proposed_resolution = None
+        self._current_resolution = None
+        self._proposed_ceilings = {}
         self._dependency_revisions: dict[DataRevisionId, dict[DataVersionId, DataRevisionId]] = {}
 
     @property
@@ -45,6 +49,7 @@ class DataSubscriptionGraph:
                     self._revision_graphs.pop(retained, None)
                     self._dependency_revisions.pop(retained, None)
         self._current_revision = revision_id
+        self._current_resolution = None
 
     def latest(self, cache: DataCache) -> DataEdgeGraph:
         if self.latest_revision is None:
@@ -54,13 +59,67 @@ class DataSubscriptionGraph:
     def current(self, cache: DataCache) -> DataEdgeGraph:
         if self.current_revision is None:
             raise LookupError("No current revision is selected")
+        if self._current_resolution is not None:
+            return self._current_resolution.graph
         return self.revision(self.current_revision, cache)
 
     def proposed_graph(self, cache: DataCache) -> DataEdgeGraph:
         """Load the proposed tree without selecting current or pruning history."""
         if self.proposed_revision is None:
             raise LookupError("No proposed revision is selected")
-        return self.revision(self.proposed_revision, cache)
+        return self.proposal(cache).graph
+
+    def proposal(self, cache: DataCache) -> DependencyResolution:
+        if self.proposed_revision is None:
+            raise LookupError("No proposed revision is selected")
+        if self._proposed_resolution is None or self._proposed_resolution.root != self.proposed_revision:
+            try:
+                graph = self.revision(self.proposed_revision, cache)
+                revisions = self._dependency_revisions.get(self.proposed_revision, {})
+                if any(revision[2] > self._proposed_ceilings.get(version, revision[2])
+                       for version, revision in revisions.items()):
+                    resolved = next(RevisionSearch(cache).solutions(
+                        self.proposed_revision, ceilings=self._proposed_ceilings), None)
+                    if resolved is None:
+                        raise InconsistentDependencyError(self.proposed_revision, set(revisions))
+                    self._proposed_resolution = resolved
+                else:
+                    self._proposed_resolution = DependencyResolution(
+                        self.proposed_revision, graph,
+                        revisions | {self.proposed_revision[:2]: self.proposed_revision})
+            except InconsistentDependencyError:
+                resolved = next(RevisionSearch(cache).solutions(
+                    self.proposed_revision, ceilings=self._proposed_ceilings), None)
+                if resolved is None:
+                    raise
+                self._proposed_resolution = resolved
+        return self._proposed_resolution
+
+    def stage_resolution(self, resolution: DependencyResolution) -> None:
+        self._proposed_resolution = resolution
+        for version, revision in resolution.revisions.items():
+            if version != resolution.root[:2]:
+                self._proposed_ceilings[version] = min(
+                    self._proposed_ceilings.get(version, revision[2]), revision[2])
+
+    def reset_proposal(self) -> None:
+        self.proposed_revision = self.latest_revision
+        self._proposed_resolution = None
+        self._proposed_ceilings = {}
+
+    def commit_proposal(self, cache: DataCache) -> None:
+        resolution = self.proposal(cache)
+        if self.current_revision != self.proposed_revision:
+            self.current_revision = self.proposed_revision
+        self._current_resolution = resolution
+
+    @property
+    def current_dependency_revisions(self) -> dict[DataVersionId, DataRevisionId]:
+        """Selected intermediate records in the committed cut, excluding its root."""
+        if self._current_resolution is None:
+            return {}
+        return {key: value for key, value in self._current_resolution.revisions.items()
+                if key != self.current_revision[:2]}
 
     def invalidate_dependency(self, revision_id: DataRevisionId) -> set[DataRevisionId]:
         """Forget trees expanded through an older count of this exact version.
@@ -73,6 +132,10 @@ class DataSubscriptionGraph:
             root for root, dependencies in self._dependency_revisions.items()
             if version_id in dependencies and dependencies[version_id] < revision_id
         }
+        if self._current_resolution is not None:
+            selected = self._current_resolution.revisions.get(version_id)
+            if selected is not None and version_id != self.current_revision[:2] and selected < revision_id:
+                invalidated.add(self.current_revision)
         for root in invalidated:
             self._revision_graphs.pop(root, None)
             # Keep the old dependency stamps until rebuilding succeeds, so a

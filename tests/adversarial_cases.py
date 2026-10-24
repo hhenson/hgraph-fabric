@@ -1,8 +1,7 @@
 """Small deterministic fixtures and an exhaustive oracle independent of production graphs.
 
 The oracle expands raw records and scans candidate cuts; it never calls the
-production graph builder, pair resolver, or stabilization helpers. Root
-containment follows the agreed rule: only the contained root version matters.
+production graph builder, pair resolver, or stabilization helpers. Selected intermediate revisions are checked against immutable raw records.
 """
 from datetime import UTC, datetime
 from itertools import combinations, product
@@ -34,7 +33,7 @@ class History:
     def revisions(self, data_id, ceiling=None):
         return sorted(r for r in self.records if r[0] == data_id and (ceiling is None or r <= ceiling))
 
-    def nodes(self, revision):
+    def nodes(self, revision, choices=None):
         """Expand raw records with version-scoped latest counts, including leaves."""
         nodes = {}
         seen = set()
@@ -54,22 +53,56 @@ class History:
                     raise ValueError("Internally conflicting tree")
                 nodes[dep_id] = dep_version
                 if dependency not in seen:
-                    stack.append(max(r for r in self.records if r[:2] == dependency))
+                    selected = (choices or {}).get(dependency)
+                    stack.append(selected or max(r for r in self.records if r[:2] == dependency))
         return nodes
 
-    def consistent(self, cut):
-        expanded = {key: self.nodes(revision) for key, revision in cut.items()}
-        for left, right in combinations(cut, 2):
-            a, b = expanded[left], expanded[right]
-            if left in b:
-                if cut[left][1] != b[left]:
-                    return False
-            elif right in a:
-                if cut[right][1] != a[right]:
-                    return False
-            elif any(a[node] != b[node] for node in a.keys() & b.keys()):
-                return False
-        return True
+    def resolutions(self, revision):
+        """Exhaustively choose intermediate records from raw stored history."""
+        def visit(todo, selected, nodes):
+            if not todo:
+                yield nodes
+                return
+            version, root = todo[0]
+            if version in selected:
+                yield from visit(todo[1:], selected, nodes)
+                return
+            revisions = [root] if root is not None else sorted(
+                (r for r in self.records if r[:2] == version), reverse=True)
+            for candidate in revisions:
+                expanded = nodes.copy()
+                dependencies = self.records[candidate].dependencies or ()
+                for name, value in (version, *dependencies):
+                    if name in expanded and expanded[name] != value:
+                        break
+                    expanded[name] = value
+                else:
+                    yield from visit(todo[1:] + [(dep, None) for dep in dependencies],
+                                     selected | {version}, expanded)
+        yield from visit([(revision[:2], revision)], set(), {})
+
+    @staticmethod
+    def compatible(left, a, right, b):
+        return all(a[node] == b[node] for node in a.keys() & b.keys())
+
+    def consistent(self, cut, choices=None):
+        if choices is not None:
+            expanded = {key: self.nodes(revision, choices[key]) for key, revision in cut.items()}
+            return all(self.compatible(left, expanded[left], right, expanded[right])
+                       for left, right in combinations(cut, 2))
+        # A root-only cut can admit several expansions. Check existence without
+        # using the production resolver or assuming latest intermediate counts.
+        keys = tuple(cut)
+        def extend(index, selected):
+            if index == len(keys):
+                return True
+            key = keys[index]
+            for nodes in self.resolutions(cut[key]):
+                if all(self.compatible(other, graph, key, nodes) for other, graph in selected.items()):
+                    if extend(index + 1, selected | {key: nodes}):
+                        return True
+            return False
+        return extend(0, {})
 
     def cuts(self, ceilings):
         keys = tuple(ceilings)
@@ -127,3 +160,7 @@ def dag_history(mask):
         for node in reversed(range(4)):
             history.add(f"n{node}", version, dependencies=dag_dependencies(edges, node, version))
     return history
+
+
+def current_choices(manager):
+    return {key: sub.current_dependency_revisions for key, sub in manager._subscriptions.items()}

@@ -1,4 +1,6 @@
 """A temporary disagreement between sibling records must not kill a subscriber."""
+from adversarial_cases import current_choices
+
 from itertools import permutations
 import unittest
 from unittest.mock import patch
@@ -26,7 +28,7 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
         manager.get_consistent_cut()
         return history, cache, manager, dependencies
 
-    def test_pending_cut_waits_and_resumes_on_either_sibling_order(self):
+    def test_cut_resolves_sibling_revision_history_in_either_delivery_order(self):
         for order in permutations(("market", "window")):
             for peer in (False, True):
                 for version, count in ((200, 0), (100, 1)):
@@ -35,8 +37,10 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
                         before = current_cut(manager)
                         manager.apply_update(history.add(order[0], 100, 1, (("universe", 2),)))
                         update = history.add("root", version, count, dependencies)
-                        self.assertEqual(manager.apply_update(update), set())
-                        self.assertEqual(current_cut(manager), before)
+                        self.assertEqual(manager.apply_update(update), {("root", 200)} if count == 0 else set())
+                        self.assertEqual(current_cut(manager)["root"], ("root", version, count))
+                        self.assertEqual(manager._subscriptions["root"].current_dependency_revisions[(order[0], 100)],
+                                         (order[0], 100, 0))
                         for universe in (1, 2):
                             self.assertEqual(manager._dependents[("universe", universe)], {"root"})
                         # Neither an unrelated item nor another sibling version
@@ -46,22 +50,22 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
                             manager.apply_update(history.add(order[1], 200))
                             advance.assert_not_called()
                         healed = history.add(order[1], 100, 1, (("universe", 2),))
-                        self.assertEqual(manager.apply_update(healed), {("root", 200)} if count == 0 else set())
+                        self.assertEqual(manager.apply_update(healed), set())
                         self.assertEqual(manager._subscriptions["root"].current_revision, ("root", version, count))
-                        self.assertTrue(history.consistent(current_cut(manager)))
+                        self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
                         with patch.object(manager, "_try_advance", wraps=manager._try_advance) as advance:
                             self.assertEqual(manager.apply_update(healed), set())
                             advance.assert_not_called()
 
-    def test_conflict_in_another_subscription_retries_the_original_update(self):
+    def test_resolving_another_subscriptions_history_allows_the_update(self):
         history, cache, manager, dependencies = self.seed(peer=True)
         manager.apply_update(history.add("market", 100, 1, (("universe", 2),)))
         before = current_cut(manager)
-        self.assertEqual(manager.apply_update(history.add("peer", 200)), set())
-        self.assertEqual(current_cut(manager), before)
-        self.assertEqual(manager.apply_update(history.add("window", 100, 1, (("universe", 2),))),
-                         {("peer", 200)})
-        self.assertTrue(history.consistent(current_cut(manager)))
+        self.assertEqual(manager.apply_update(history.add("peer", 200)), {("peer", 200)})
+        self.assertEqual(current_cut(manager), before | {"peer": ("peer", 200, 0)})
+        self.assertEqual(manager._subscriptions["root"].current_dependency_revisions[("market", 100)], ("market", 100, 0))
+        self.assertEqual(manager.apply_update(history.add("window", 100, 1, (("universe", 2),))), set())
+        self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_explicit_cut_retains_last_accepted_selection_while_waiting(self):
         history, cache, manager, dependencies = self.seed()
@@ -87,7 +91,7 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
 class InconsistentDependencyPollingTests(unittest.TestCase):
     setUp = test_notification_startup.NotificationStartupTests.setUp
 
-    def test_live_subscriber_keeps_old_table_until_dependencies_converge(self):
+    def test_live_subscriber_selects_new_table_using_coherent_sibling_revisions(self):
         publish(self.publisher, "universe", 1)
         publish(self.publisher, "universe", 2)
         for sibling in ("market", "window"):
@@ -102,13 +106,13 @@ class InconsistentDependencyPollingTests(unittest.TestCase):
             self.assertEqual(self.session.poll(0), {})
             newer, update = publish(self.publisher, "root", 200, dependencies)
             self.transport.send(update)
-            self.assertEqual(self.session.poll(0), {})
-            self.assertEqual(root.current_revision, ("root", 100, 0))
-            self.assertIs(self.session.get_consistent_cut()["root"], initial)
-            self.assertNotIn(("data", ("root", 200)), self.reader.loads)
+            self.assertIs(self.session.poll(0)["root"], newer)
+            self.assertEqual(root.current_revision, ("root", 200, 0))
+            self.assertEqual(root.current_dependency_revisions[("market", 100)], ("market", 100, 0))
+            self.assertIs(self.session.get_consistent_cut()["root"], newer)
             _, window = self.publisher.publish(id="window", dependencies=(("universe", 2),))
             self.transport.send(window)
-            self.assertIs(self.session.poll(0)["root"], newer)
+            self.assertEqual(self.session.poll(0), {})
             self.assertEqual(root.current_revision, ("root", 200, 0))
             self.transport.send(window)
             self.assertEqual(self.session.poll(0), {})

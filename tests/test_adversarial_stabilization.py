@@ -1,4 +1,6 @@
 """Deterministic adversarial matrix: topology, histories, order and live updates."""
+from adversarial_cases import current_choices
+
 from itertools import permutations, product
 from random import Random
 import unittest
@@ -84,7 +86,7 @@ class AdversarialStabilizationTests(unittest.TestCase):
                     manager = DataSubscriptionManager(HistoryCache(history))
                     manager.add_subscriptions(order)
                     manager.get_consistent_cut()
-                    self.assertTrue(history.consistent(current_cut(manager)))
+                    self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
                     self.assertIn(current_cut(manager), list(history.cuts({key: history.heads[key] for key in order})))
 
     def test_wide_and_deep_shared_dependency_graphs(self):
@@ -104,7 +106,7 @@ class AdversarialStabilizationTests(unittest.TestCase):
                     manager = DataSubscriptionManager(HistoryCache(history))
                     manager.add_subscriptions(f"n{i}" for i in range(size))
                     self.assertEqual(len(manager.get_consistent_cut()), size)
-                    self.assertTrue(history.consistent(current_cut(manager)))
+                    self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_metadata_only_updates_and_shared_source_subscriptions(self):
         for subscribe_source in (False, True):
@@ -197,4 +199,4 @@ class AdversarialStabilizationTests(unittest.TestCase):
                 for key, sub in manager._subscriptions.items():
                     self.assertIs(sub.current(cache), graphs[key])
                 manager.get_consistent_cut()
-                self.assertTrue(history.consistent(current_cut(manager)))
+                self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))

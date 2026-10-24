@@ -147,13 +147,15 @@ class ConsistentCutTests(unittest.TestCase):
         )
         self.assertEqual(self.cache.get_latest_revision.call_args_list, [call(("y", 200))])
 
-    def test_contained_root_match_ignores_other_common_node_versions(self):
+    def test_contained_root_match_resolves_the_consumed_revision(self):
         self.record("middle", 100, 0, (("a_source", 1),))
-        self.record("middle", 100, 7, (("a_source", 2),))
+        for count in range(1, 8):
+            self.record("middle", 100, count, (("a_source", 2),))
         middle = self.subscription(("middle", 100, 0))
         parent = self.subscription(self.record("parent", 200, dependencies=(("middle", 100),)))
         # The parent expands middle's latest revision for version 100, while
-        # the subscription has an earlier count. Root versions already agree.
+        # the subscription has an earlier count. Keep the root version and
+        # resolve the parent's intermediate choice to the subscribed count.
         for left, right in ((middle, parent), (parent, middle)):
             with self.subTest(left=left.data_id):
                 self.assertEqual(
@@ -161,6 +163,7 @@ class ConsistentCutTests(unittest.TestCase):
                     (left.proposed_revision, right.proposed_revision),
                 )
         self.assertEqual(middle.proposed_revision, ("middle", 100, 0))
+        self.assertEqual(parent.proposal(self.cache).revisions[("middle", 100)], ("middle", 100, 0))
 
     def test_newer_contained_root_is_resolved_directly(self):
         historical = self.record("middle", 100, 7, (("a_source", 1),))
@@ -180,9 +183,10 @@ class ConsistentCutTests(unittest.TestCase):
         self.assertNotIn(call(("middle", 9000, 0)), self.cache.get_revision.call_args_list)
         self.assertEqual(middle.proposed_revision, current)
 
-    def test_downgraded_contained_root_only_constrains_its_own_version(self):
+    def test_downgraded_contained_root_resolves_its_upstream_constraints(self):
         self.record("middle", 100, 0, (("a_source", 1),))
-        self.record("middle", 100, 7, (("a_source", 2),))
+        for count in range(1, 8):
+            self.record("middle", 100, count, (("a_source", 2),))
         self.record("middle", 9000, 3, (("a_source", 3),))
         self.record("parent", 200, 0, (("middle", 100),))
         self.record("parent", 200, 1, (("middle", 9000),))

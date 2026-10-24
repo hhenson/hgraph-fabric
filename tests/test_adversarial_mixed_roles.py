@@ -4,6 +4,8 @@ Generation uses raw records to exclude internally conflicting trees before any
 cache notification. It never rejects a history because of a resolver result.
 Every accepted publication is checked by the existing independent stream oracle.
 """
+from adversarial_cases import current_choices
+
 from itertools import permutations, product
 from random import Random
 import unittest
@@ -134,6 +136,9 @@ class MixedRoleReviewTests(unittest.TestCase):
                             else:
                                 outcomes.add("compatible")
                                 self.assertIn(dict(zip(ids[::-1] if reverse else ids, result)), admissible)
+                                selected = {sub.data_id: sub._proposed_resolution.revisions for sub in args}
+                                self.assertTrue(history.consistent(
+                                    dict(zip((sub.data_id for sub in args), result)), selected))
                             self.assertEqual([(s.latest_revision, s.current_revision, s.proposed_revision)
                                               for s in subs], selections)
                             comparisons += 1
@@ -178,7 +183,7 @@ class MixedRoleReviewTests(unittest.TestCase):
                 result = manager.apply_update(history.add("m", 100, count, dependencies=(("x", 2),)))
                 self.assertEqual(result, {("a", 9000), ("b", 9000), ("m", 100)})
                 self.assertEqual(current_cut(manager), {key: history.heads[key] for key in (*order, "m")})
-                self.assertTrue(history.consistent(current_cut(manager)))
+                self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
                 self.assertTrue(all(manager._subscriptions[key].current_revision >= old[key] for key in old))
                 self.assertEqual(manager._conflicts, {})
                 self.assertEqual(manager.apply_update(history.records[history.heads["m"]]), set())

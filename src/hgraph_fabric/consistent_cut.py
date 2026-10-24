@@ -2,6 +2,7 @@ from collections.abc import Iterator
 from enum import Enum, auto
 
 from .data_cache import DataCache
+from .dependency_resolution import RevisionSearch
 from .data_graph import DataEdgeGraph
 from .data_structures import DataId, DataRevisionId, DataVersion
 from .data_subscription_graph import DataSubscriptionGraph
@@ -30,24 +31,23 @@ def find_consistent_cut(
     proposed to latest before a search and applies returned pairs between
     comparisons; this function never resets a selection to latest.
 
-    If one subscription's root occurs in the other tree, only that root's
-    version needs to match: its descendants are covered by that dependency.
-    Resolve a newer root directly to the consumed version. If it was downgraded
-    in an earlier comparison, keep it fixed and search the consuming tree.
+    If one subscription's root occurs in the other tree, resolve a newer root
+    directly to the consumed version and align the intermediate records too.
+    Matching a root value does not discard its dependency constraints.
 
     Otherwise, the first mismatching common node chooses the leading
     subscription, and the other stays fixed. Prefer matching all original
     common nodes to omitting any; also check newly shared nodes. Search newest
     first, returning the first exact match. Retain the newest consistent omission
     only as a fallback after every admissible exact candidate is ruled out.
-    Refreshed descendants can make expanded histories non-monotonic even when
-    published dependency versions advance monotonically. If holding one side fixed
+    Intermediate revision choices are searched within their referenced data
+    version before changing a root revision. If holding one side fixed
     cannot find an alignment, search both bounded histories as an exceptional fallback. Raise
     LookupError if neither search finds a compatible pair.
 
-    Trees loaded during the search are cached normally. No latest, proposed or
-    current selection is changed; the caller can apply the
-    returned revisions after reviewing or combining the result.
+    Successful intermediate choices are staged on the subscriptions. Root
+    revision selections and committed graphs remain unchanged until the caller
+    accepts the returned revisions and commits the complete proposed cut.
 
     Updates supply committed currents as inclusive lower bounds. An exact
     match below current is not a candidate: prefer an omission at current to
@@ -64,75 +64,42 @@ def find_consistent_cut(
             if revision < floor:
                 raise NoConsistentCutError("Proposed revision is below its lower bound")
     left_graph, right_graph = left.proposed_graph(cache), right.proposed_graph(cache)
+    search = RevisionSearch(cache)
+    common = _nodes(left_graph, left_revision).keys() & _nodes(right_graph, right_revision).keys()
+    resolved, aligned = _resolve_dependencies(left, right, left_revision, right_revision, common, search)
+    if aligned is _Comparison.EXACT:
+        _stage(left, right, resolved)
+        return left_revision, right_revision
+    omission = resolved
 
-    # Containment is stronger than ordinary overlap. Matching the contained
-    # root's version covers its entire subtree, so do not compare descendants.
-    # This includes leaves, whose roots are absent from their own edge graphs.
-    if left_revision[0] == right_revision[0]:
-        contained_is_left = left_revision[1] >= right_revision[1]
-    elif right_graph.has_data_id(left_revision[0]):
-        contained_is_left = True
-    elif left_graph.has_data_id(right_revision[0]):
-        contained_is_left = False
-    else:
-        contained_is_left = None
-
-    if contained_is_left is not None:
+    # A contained root with a newer data version can jump directly to the
+    # referenced version. Its dependency records still need to agree.
+    for contained_is_left in (True, False):
         contained = left_revision if contained_is_left else right_revision
-        other = right_revision if contained_is_left else left_revision
-        other_graph = right_graph if contained_is_left else left_graph
-        target = (
-            other[1] if contained[0] == other[0]
-            else other_graph.get_data_version_id(contained[0])[1]
-        )
-        if contained[1] == target:
-            return left_revision, right_revision
-        if contained[1] > target:
-            # The other tree already identifies the required root version.
-            # Resolve its revision directly; there are no count bounds to bisect.
-            floor = lower_bounds[0 if contained_is_left else 1]
-            if floor is not None and target < floor[1]:
-                # The consuming side may have an earlier compatible revision
-                # (including an omission). Do not cross the contained current.
-                return _search_both_histories(
-                    left, right, left_revision, right_revision, {contained[0]}, cache,
-                    *lower_bounds,
-                )
+        other_nodes = _nodes(right_graph, right_revision) if contained_is_left else _nodes(left_graph, left_revision)
+        target = other_nodes.get(contained[0])
+        floor = lower_bounds[0 if contained_is_left else 1]
+        if target is not None and contained[1] > target and (floor is None or target >= floor[1]):
             adjusted = cache.get_latest_revision((contained[0], target))
-            return (adjusted, right_revision) if contained_is_left else (left_revision, adjusted)
-        # An earlier tournament comparison may have downgraded this root.
-        # Hold it fixed and search for its version or a consistent omission.
-        # Retain its full tree: historical candidates may no longer contain it.
-        common = {contained[0]}
-        leading_is_left = not contained_is_left
-        leading = left if leading_is_left else right
-        start = other
-    else:
-        if not left_graph or not right_graph:
-            return left_revision, right_revision  # Unrelated leaf: nothing to align.
-        left_nodes = _nodes(left_graph, left_revision)
-        right_nodes = _nodes(right_graph, right_revision)
+            pair = (adjusted, right_revision) if contained_is_left else (left_revision, adjusted)
+            resolved, aligned = _resolve_dependencies(left, right, *pair, common, search)
+            if aligned is _Comparison.EXACT:
+                _stage(left, right, resolved)
+                return pair
 
-        # 1. Only shared IDs impose agreement. A stable order makes the choice
-        #    of the first mismatch reproducible; unrelated nodes need no alignment.
-        common = left_nodes.keys() & right_nodes.keys()
-        mismatch = _first_mismatch(left_nodes, right_nodes)
-        if mismatch is None:
-            return left_revision, right_revision
-
-        # 2. Fix the lagging graph as the target while searching the leading
-        #    subscription's bounded history.
-        if left_nodes[mismatch] > right_nodes[mismatch]:
-            leading, start = left, left_revision
-            leading_is_left = True
-        else:
-            leading, start = right, right_revision
-            leading_is_left = False
+    left_nodes = _nodes(left_graph, left_revision)
+    right_nodes = _nodes(right_graph, right_revision)
+    mismatch = _first_mismatch(left_nodes, right_nodes)
+    if mismatch is None:
+        # The starting graphs already agree; dependency search has staged them.
+        _stage(left, right, omission)
+        return left_revision, right_revision
+    leading_is_left = left_nodes[mismatch] > right_nodes[mismatch]
+    leading = left if leading_is_left else right
+    start = left_revision if leading_is_left else right_revision
     leading_floor = lower_bounds[0 if leading_is_left else 1]
-    fixed_floor = lower_bounds[1 if leading_is_left else 0]
     fixed = right if leading_is_left else left
     fixed_revision = right_revision if leading_is_left else left_revision
-    fixed_nodes = _nodes(right_graph if leading_is_left else left_graph, fixed_revision)
 
     def result(revision: DataRevisionId) -> tuple[DataRevisionId, DataRevisionId]:
         return (revision, right_revision) if leading_is_left else (left_revision, revision)
@@ -141,31 +108,31 @@ def find_consistent_cut(
     # Revision zero links to the preceding sparse version and its maximum count;
     # only counts within a version are consecutive.
     #
-    # A refreshed intermediate can change an expanded history from [1, 3, 5]
-    # to [7, 3, 5]. Neither endpoints nor middle probes can then rule out a range.
-    # Visiting newest first makes the first exact match the largest admissible
-    # revision, so it can return immediately without searching older records.
-    absent = None
+    # Each root candidate searches intermediate revisions within fixed data
+    # versions. Expanded descendants are not scalar ordering keys for roots
+    # with changing paths. Immutable immediate records provide binary bounds
+    # inside RevisionSearch when their membership and ordering permit it.
+    absent = omission if leading_is_left else omission[::-1] if omission else None
     for revision in _revisions_backwards(start, cache, leading_floor):
-        nodes = _nodes(leading.revision(revision, cache), revision)
-        comparison = _compare_candidates(revision, nodes, fixed_revision, fixed_nodes, common)
-        if comparison is _Comparison.CONFLICT:
-            continue
+        resolved, comparison = _resolve_dependencies(
+            leading, fixed, revision, fixed_revision, common, search)
         if comparison is _Comparison.EXACT:
+            _stage(leading, fixed, resolved)
             return result(revision)
-        if absent is None:
-            absent = revision  # Remember the newest consistent omission only.
+        if resolved is not None and absent is None:
+            absent = resolved
 
     # 4. An omission has lower precedence than every admissible exact match.
     # Use it only after the entire bounded history has been searched.
     if absent is not None:
-        return result(absent)
+        _stage(leading, fixed, absent)
+        return result(absent[0].root)
     # Independent inputs may have been consumed in different orders, leaving no
     # revision that matches the other side's complete fixed dependency vector.
     # Only after the normal search fails do we allow both sides to move. Retain
     # argument order and the original proposed upper bounds throughout.
     joint = _search_both_histories(
-        leading, fixed, start, fixed_revision, common, cache, leading_floor, fixed_floor
+        leading, fixed, start, fixed_revision, common, cache, leading_floor, lower_bounds[1 if leading_is_left else 0]
     )
     return joint if leading_is_left else joint[::-1]
 
@@ -188,23 +155,81 @@ def _search_both_histories(
     affect the normal one-sided search. Metadata failures propagate.
     """
     absent = None
+    search = RevisionSearch(cache)
     for fixed_revision in _revisions_backwards(fixed_start, cache, fixed_floor):
-        fixed_nodes = _nodes(fixed.revision(fixed_revision, cache), fixed_revision)
         for leading_revision in _revisions_backwards(leading_start, cache, leading_floor):
-            leading_nodes = _nodes(leading.revision(leading_revision, cache), leading_revision)
-            comparison = _compare_candidates(
-                leading_revision, leading_nodes, fixed_revision, fixed_nodes, common
-            )
-            if comparison is _Comparison.CONFLICT:
-                continue
-            pair = leading_revision, fixed_revision
+            resolved, comparison = _resolve_dependencies(
+                leading, fixed, leading_revision, fixed_revision, common, search)
             if comparison is _Comparison.EXACT:
-                return pair
-            if absent is None:
-                absent = pair
+                _stage(leading, fixed, resolved)
+                return leading_revision, fixed_revision
+            if resolved is not None and absent is None:
+                absent = resolved
     if absent is not None:
-        return absent
+        _stage(leading, fixed, absent)
+        return absent[0].root, absent[1].root
     raise NoConsistentCutError("No compatible pair exists within the proposed histories")
+
+
+def _stage(left, right, resolved):
+    left.stage_resolution(resolved[0])
+    right.stage_resolution(resolved[1])
+
+
+def _resolve_dependencies(left, right, left_revision, right_revision, common, search):
+    """Hold root revisions fixed and resolve intermediate revision choices first.
+
+    Start with the proposals already selected by earlier comparisons. A failed
+    candidate never changes either proposal. Try changing one tree before the
+    joint search; retain omissions only after ruling out an exact alignment.
+    """
+    if left_revision == left.proposed_revision and right_revision == right.proposed_revision:
+        a, b = left.proposal(search.cache), right.proposal(search.cache)
+        comparison = _compare_candidates(left_revision, a.nodes, right_revision, b.nodes, common)
+        if comparison is _Comparison.EXACT:
+            return (a, b), comparison
+
+    # A root's immediate version references cannot be revised while that root
+    # revision is fixed. Avoid exploring unrelated intermediate histories.
+    if (search.record(right_revision).get(left_revision[0], left_revision[1]) != left_revision[1]
+            or search.record(left_revision).get(right_revision[0], right_revision[1]) != right_revision[1]):
+        return None, _Comparison.CONFLICT
+
+    def candidates(sub, revision, constraints=None):
+        yield from search.solutions(revision, constraints=constraints,
+                                    ceilings=sub._proposed_ceilings)
+
+    def initial(sub, revision):
+        if sub.proposed_revision == revision:
+            return sub.proposal(search.cache)
+        return next(candidates(sub, revision), None)
+
+    first_left, first_right = initial(left, left_revision), initial(right, right_revision)
+    absent = None
+    seen = set()
+
+    def pairs():
+        if first_left is not None and first_right is not None:
+            yield first_left, first_right
+            for candidate in candidates(left, left_revision, first_right.nodes):
+                yield candidate, first_right
+            for candidate in candidates(right, right_revision, first_left.nodes):
+                yield first_left, candidate
+        for candidate in candidates(left, left_revision):
+            for other in candidates(right, right_revision, candidate.nodes):
+                yield candidate, other
+
+    for a, b in pairs():
+        key = a.signature, b.signature
+        if key in seen:
+            continue
+        seen.add(key)
+        comparison = _compare_candidates(left_revision, a.nodes, right_revision, b.nodes, common)
+        if comparison is _Comparison.EXACT:
+            return (a, b), comparison
+        if comparison is _Comparison.OMISSION and absent is None:
+            absent = a, b
+    return absent, _Comparison.OMISSION if absent else _Comparison.CONFLICT
 
 
 def _compare_candidates(
@@ -214,20 +239,13 @@ def _compare_candidates(
     right_nodes: dict[DataId, DataVersion],
     common: set[DataId],
 ) -> _Comparison:
-    # Containment belongs to this candidate pair, not the original proposals.
-    # A matching root is exact even if its latest dependency revision has
-    # changed or removed descendants from the original common-node set.
-    if left_revision[0] in right_nodes:
-        matches = left_revision[1] == right_nodes[left_revision[0]]
-        return _Comparison.EXACT if matches else _Comparison.CONFLICT
-    if right_revision[0] in left_nodes:
-        matches = right_revision[1] == left_nodes[right_revision[0]]
-        return _Comparison.EXACT if matches else _Comparison.CONFLICT
-
-    # Without containment every shared node must agree, including newly shared
-    # nodes. Losing an original dependency cannot excuse a different conflict.
+    # Root versions and every other shared node belong to the same cut.
+    # If a root also occurs below its peer, select compatible intermediate
+    # records there rather than ignoring the root's upstream dependencies.
     if _first_mismatch(left_nodes, right_nodes) is not None:
         return _Comparison.CONFLICT
+    if left_revision[0] in right_nodes or right_revision[0] in left_nodes:
+        return _Comparison.EXACT
     if common <= left_nodes.keys() and common <= right_nodes.keys():
         return _Comparison.EXACT
     return _Comparison.OMISSION

@@ -1,4 +1,6 @@
 """Startup snapshot/delta overlap and late notifications at the session boundary."""
+from adversarial_cases import current_choices
+
 from collections import deque
 from dataclasses import replace
 import unittest
@@ -144,7 +146,7 @@ class NotificationStartupTests(unittest.TestCase):
         update = history.add("middle", 100, 1, dependencies=(("x", 2),))
         self.assertEqual(manager.apply_update(update), {("a", 200), ("b", 200)})
         self.assertEqual(cache.latest("middle"), ("middle", 200, 0))
-        self.assertTrue(history.consistent(current_cut(manager)))
+        self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_old_notification_cannot_seed_an_incomplete_historical_head(self):
         history = History()
@@ -189,7 +191,7 @@ class NotificationStartupTests(unittest.TestCase):
                                  ("middle", 100, max(counts)))
                 manager.add_subscriptions(("a", "b"))
                 self.assertEqual(manager.get_consistent_cut(), {("a", 100), ("b", 100)})
-                self.assertTrue(history.consistent(current_cut(manager)))
+                self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_historical_notification_for_unseen_id_cannot_hide_stored_head(self):
         history = History()
