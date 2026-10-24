@@ -91,6 +91,39 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
 class InconsistentDependencyPollingTests(unittest.TestCase):
     setUp = test_notification_startup.NotificationStartupTests.setUp
 
+    def test_historical_dependency_notification_retries_blocked_proposal(self):
+        for initialized in (False, True):
+            with self.subTest(initialized=initialized):
+                self.setUp()
+                for version in (1, 2, 3):
+                    publish(self.publisher, "x", version)
+                publish(self.publisher, "p", 100, (("x", 3),))
+                publish(self.publisher, "m", 100, (("p", 100),))
+                self.publisher.publish(id="m", dependencies=(("x", 2),))
+                publish(self.publisher, "n", 100, (("x", 1),))
+                old, _ = publish(self.publisher, "a", 100)
+                with self.session:
+                    if initialized:
+                        root = self.session.add_subscription("a")
+                        self.assertIs(self.session.poll(0)["a"], old)
+                    newer, update = publish(self.publisher, "a", 200, (("m", 100), ("n", 100)))
+                    if not initialized:
+                        root = self.session.add_subscription("a")
+                    self.transport.send(update)
+                    self.assertEqual(self.session.poll(0), {})
+                    self.assertEqual(root.current_revision, ("a", 100, 0) if initialized else None)
+
+                    # Latest M has no P path. Search discovers P only through
+                    # M/r0, so its notification must wake the failed proposal.
+                    _, healed = self.publisher.publish(id="p", dependencies=())
+                    self.transport.send(healed)
+                    self.assertIs(self.session.poll(0)["a"], newer)
+                    self.assertEqual(root.current_revision, ("a", 200, 0))
+                    self.assertEqual(root.current_dependency_revisions[("m", 100)], ("m", 100, 0))
+                    self.assertEqual(root.current_dependency_revisions[("p", 100)], ("p", 100, 1))
+                    self.transport.send(healed)
+                    self.assertEqual(self.session.poll(0), {})
+
     def test_live_subscriber_selects_new_table_using_coherent_sibling_revisions(self):
         publish(self.publisher, "universe", 1)
         publish(self.publisher, "universe", 2)

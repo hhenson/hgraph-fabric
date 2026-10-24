@@ -73,12 +73,13 @@ class DataSubscriptionGraph:
         if self.proposed_revision is None:
             raise LookupError("No proposed revision is selected")
         if self._proposed_resolution is None or self._proposed_resolution.root != self.proposed_revision:
+            search = RevisionSearch(cache)
             try:
                 graph = self.revision(self.proposed_revision, cache)
                 revisions = self._dependency_revisions.get(self.proposed_revision, {})
                 if any(revision[2] > self._proposed_ceilings.get(version, revision[2])
                        for version, revision in revisions.items()):
-                    resolved = next(RevisionSearch(cache).solutions(
+                    resolved = next(search.solutions(
                         self.proposed_revision, ceilings=self._proposed_ceilings), None)
                     if resolved is None:
                         raise InconsistentDependencyError(self.proposed_revision, set(revisions))
@@ -87,10 +88,11 @@ class DataSubscriptionGraph:
                     self._proposed_resolution = DependencyResolution(
                         self.proposed_revision, graph,
                         revisions | {self.proposed_revision[:2]: self.proposed_revision})
-            except InconsistentDependencyError:
-                resolved = next(RevisionSearch(cache).solutions(
+            except InconsistentDependencyError as error:
+                resolved = next(search.solutions(
                     self.proposed_revision, ceilings=self._proposed_ceilings), None)
                 if resolved is None:
+                    error.dependencies.update(search.dependencies)
                     raise
                 self._proposed_resolution = resolved
         return self._proposed_resolution

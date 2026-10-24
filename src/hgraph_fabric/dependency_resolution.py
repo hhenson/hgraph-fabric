@@ -33,6 +33,7 @@ class RevisionSearch:
     def __init__(self, cache: DataCache):
         self.cache = cache
         self.indexes = {}
+        self.dependencies: set[DataVersionId] = set()
 
     def counts(self, version, maximum, constraints):
         # The latest record is the usual case; do not load its history unless
@@ -65,6 +66,9 @@ class RevisionSearch:
         for name, version in dependencies:
             if versions.setdefault(name, version) != version:
                 raise ValueError(f"Conflicting version for data ID {name!r}")
+        # A failed candidate can expose a path absent from the latest tree.
+        # Keep it available to callers that register notification retries.
+        self.dependencies.update(dependencies)
         return dict(dependencies)
 
     def solutions(self, root, *, constraints=None, ceilings=None) -> Iterator[DependencyResolution]:
