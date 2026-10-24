@@ -100,12 +100,26 @@ flowchart LR
 is not yet compatible with the expanded universe.*
 
 Taking the latest publication from each input would combine data from different
-stages of the update. Waiting for an arbitrary amount of time does not establish
-that the loaders have completed. Validation needs to identify which universe
-each supporting publication has accepted, and which positions that universe
-has accepted. Once the remaining publications establish agreement along these
-paths, the new batch can proceed. Until then, the consumer retains its previous
-coherent selection.
+stages of the update. Validation would receive desired positions that include C,
+but market data and reference data that cover only A and B. Each publication may
+be valid in isolation, yet their combination is not a valid basis for validating
+the new batch.
+
+Validation must ensure that it is processing a consistent set of data before
+it can safely compute. This requires establishing that common upstream datasets
+have been processed consistently across all contributing input paths. For each
+shared upstream dataset, those paths must agree on the published data they have
+accepted. Here, the supporting inputs must agree on the universe, and their
+indirect positions dependency must agree with validation's direct positions
+input. The arrival of new analytics alone provides no evidence that the market
+data and reference-data paths have caught up. Waiting for an arbitrary amount
+of time provides no such evidence either.
+
+To address this failure, hgraph fabric records which input publications each
+computation has accepted. A consumer follows these records across its input
+paths and checks agreement at their common upstream datasets. It admits a new
+combination only when that agreement is established; otherwise, it retains its
+previous coherent selection while the remaining computations catch up.
 
 This motivates giving each published dataset value an identity. A **dataset
 ID** names a dataset, such as desired positions or the trading universe. A
@@ -158,6 +172,9 @@ From downstream, the absence of a new universe publication is ambiguous. The
 builder might still be processing the new positions, or it might have finished
 and found no change. Data versions distinguish different published values,
 but cannot on their own distinguish these two states of computational progress.
+Proceeding immediately would assume acceptance that has not been established.
+Waiting for a new universe value could instead block the batch indefinitely,
+even though the builder has finished and its existing output is suitable.
 Validation needs an acknowledgement that the retained universe is suitable
 for the new positions. Requiring a new universe data version solely to convey
 this fact would give unchanged data a new identity and needlessly change the
