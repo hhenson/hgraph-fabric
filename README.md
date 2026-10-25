@@ -68,10 +68,14 @@ of this contract.
 
 Tree refresh and cut advancement are separate. When the gate skips a search,
 committed roots and their resolved graphs remain unchanged. The next attempt
-starts with latest candidates and compares changed intermediate choices too.
-With an established cut, it sets proposals to latest and first compares the
-updated item against every other item, rechecking earlier matches if its proposal
-changes. If that proposal drops to its committed current (or below), it stops
+starts waiting roots at latest. Roots already at latest reuse their committed
+graphs as the stable starting set when their intermediate choices are still
+latest. Their root revisions stay fixed, while their intermediate revision
+choices can still change to resolve a comparison. An
+at-latest root does not drive an upgrade attempt. With an established cut, the
+manager first compares the updated item against every other item, rechecking
+earlier matches if its proposal changes. If that proposal drops to its committed
+current (or below), it stops
 immediately and retains the existing cut. The update must also leave every other
 subscription at or above its committed current. These currents are inclusive
 search bounds: an exact match below current cannot displace a valid omission
