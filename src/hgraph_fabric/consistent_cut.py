@@ -113,7 +113,8 @@ def find_consistent_cut(
     # with changing paths. Immutable immediate records provide binary bounds
     # inside RevisionSearch when their membership and ordering permit it.
     absent = omission if leading_is_left else omission[::-1] if omission else None
-    for revision in _revisions_backwards(start, cache, leading_floor):
+    fixed_inputs = search.record(fixed_revision) | {fixed_revision[0]: fixed_revision[1]}
+    for revision in _revisions_backwards(start, cache, leading_floor, search, fixed_inputs):
         resolved, comparison = _resolve_dependencies(
             leading, fixed, revision, fixed_revision, common, search)
         if comparison is _Comparison.EXACT:
@@ -156,8 +157,9 @@ def _search_both_histories(
     """
     absent = None
     search = RevisionSearch(cache)
-    for fixed_revision in _revisions_backwards(fixed_start, cache, fixed_floor):
-        for leading_revision in _revisions_backwards(leading_start, cache, leading_floor):
+    for fixed_revision in _revisions_backwards(fixed_start, cache, fixed_floor, search):
+        fixed_inputs = search.record(fixed_revision) | {fixed_revision[0]: fixed_revision[1]}
+        for leading_revision in _revisions_backwards(leading_start, cache, leading_floor, search, fixed_inputs):
             resolved, comparison = _resolve_dependencies(
                 leading, fixed, leading_revision, fixed_revision, common, search)
             if comparison is _Comparison.EXACT:
@@ -211,10 +213,17 @@ def _resolve_dependencies(left, right, left_revision, right_revision, common, se
     def pairs():
         if first_left is not None and first_right is not None:
             yield first_left, first_right
-            for candidate in candidates(left, left_revision, first_right.nodes):
-                yield candidate, first_right
-            for candidate in candidates(right, right_revision, first_left.nodes):
-                yield first_left, candidate
+            conflict = _first_mismatch(first_left.nodes, first_right.nodes)
+            # Start at the leading conflict path, independent of argument order.
+            left_leads = conflict is None or first_left.nodes[conflict] > first_right.nodes[conflict]
+            order = (True, False) if left_leads else (False, True)
+            for change_left in order:
+                if change_left:
+                    for candidate in candidates(left, left_revision, first_right.nodes):
+                        yield candidate, first_right
+                else:
+                    for candidate in candidates(right, right_revision, first_left.nodes):
+                        yield first_left, candidate
         for candidate in candidates(left, left_revision):
             for other in candidates(right, right_revision, candidate.nodes):
                 yield candidate, other
@@ -252,13 +261,18 @@ def _compare_candidates(
 
 
 def _revisions_backwards(
-    revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None = None
+    revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None,
+    search: RevisionSearch, constraints=None,
 ) -> Iterator[DataRevisionId]:
     # Counts are consecutive within a version. Version IDs are sparse and must
     # be reached through revision-zero links, including the prior maximum count.
     for version, maximum_count in _version_bounds(revision, cache, floor):
         minimum_count = floor[2] if floor is not None and version == floor[1] else 0
-        for count in range(maximum_count, minimum_count - 1, -1):
+        # Reaching the subscribed parent uses the same zero-count probe and
+        # immediate-record bounds as intermediate parents. Only immutable inputs
+        # of the fixed root constrain this search; its descendants may resolve
+        # through different intermediate revisions during a later comparison.
+        for count in search.counts((revision[0], version), maximum_count, constraints, minimum_count):
             yield revision[0], version, count
 
 

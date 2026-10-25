@@ -1,6 +1,7 @@
 """Choose revision records without changing referenced data versions."""
 from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
+from collections import deque
 from collections.abc import Iterator
 
 from .data_cache import DataCache
@@ -24,7 +25,7 @@ class DependencyResolution:
 
 
 class RevisionSearch:
-    """A search-local index of immutable immediate-dependency records.
+    """Resolve conflict paths using immutable immediate-dependency records.
 
     Binary bounds are used only on a version whose immediate membership and
     ordering have been checked. Descendant expansions are never used as an
@@ -33,34 +34,40 @@ class RevisionSearch:
     def __init__(self, cache: DataCache):
         self.cache = cache
         self.indexes = {}
+        self.records = {}
         self.dependencies: set[DataVersionId] = set()
 
-    def counts(self, version, maximum, constraints):
+    def counts(self, version, maximum, constraints, minimum=0):
         # The latest record is the usual case; do not load its history unless
         # that candidate fails or a caller asks for another solution.
         yield maximum
-        if maximum == 0:
+        if maximum == minimum:
             return
+        # Probe revision zero before trying intervening counts. Updates use
+        # their committed floor when it is higher than zero.
+        self.record((*version, minimum))
         if not constraints:
-            yield from range(maximum - 1, -1, -1)
+            yield from range(maximum - 1, minimum - 1, -1)
             return
-        key = version, maximum
+        key = version, minimum, maximum
         if key not in self.indexes:
-            records = [self.record((*version, count)) for count in range(maximum + 1)]
+            records = [self.record((*version, count)) for count in range(minimum, maximum + 1)]
             names = records[0].keys()
             ordered = all(record.keys() == names for record in records)
             columns = {name: [record[name] for record in records] for name in names} if ordered else {}
             ordered = ordered and all(all(a <= b for a, b in zip(values, values[1:]))
                                       for values in columns.values())
             self.indexes[key] = columns if ordered else {}
-        low, high = 0, maximum + 1
+        low, high = minimum, maximum + 1
         for name, values in self.indexes[key].items():
             if name in constraints:
-                low = max(low, bisect_left(values, constraints[name]))
-                high = min(high, bisect_right(values, constraints[name]))
+                low = max(low, minimum + bisect_left(values, constraints[name]))
+                high = min(high, minimum + bisect_right(values, constraints[name]))
         yield from range(min(high - 1, maximum - 1), low - 1, -1)
 
     def record(self, revision):
+        if revision in self.records:
+            return self.records[revision]
         dependencies = self.cache.get_revision(revision).dependencies or ()
         versions = {revision[0]: revision[1]}
         for name, version in dependencies:
@@ -69,9 +76,96 @@ class RevisionSearch:
         # A failed candidate can expose a path absent from the latest tree.
         # Keep it available to callers that register notification retries.
         self.dependencies.update(dependencies)
-        return dict(dependencies)
+        self.records[revision] = dict(dependencies)
+        return self.records[revision]
 
     def solutions(self, root, *, constraints=None, ceilings=None) -> Iterator[DependencyResolution]:
+        """Follow conflict paths first; retain exhaustive alternatives as fallback.
+
+        A path match avoids enumerating histories on unrelated branches. The
+        fallback still covers changing membership, joint choices on both trees,
+        and exact alignments after a path search finds an omission.
+        """
+        first = self._path_solution(root, constraints or {}, ceilings or {})
+        if first is not None:
+            yield first
+        for candidate in self._enumerate_solutions(root, constraints=constraints, ceilings=ceilings):
+            if first is None or candidate.signature != first.signature:
+                yield candidate
+
+    def _expand(self, root, choices, ceilings):
+        """Keep all parent links, including paths that currently disagree."""
+        pending = deque([root[:2]])
+        revisions, versions, parents, edges = {}, {}, {}, []
+        while pending:
+            version = pending.popleft()
+            if version in revisions:
+                continue
+            if version == root[:2]:
+                revision = root
+            else:
+                head = choices.get(version) or self.cache.get_latest_revision(version)
+                revision = (*version, min(head[2], ceilings.get(version, head[2])))
+            revisions[version] = revision
+            versions.setdefault(version[0], set()).add(version[1])
+            for dependency in self.record(revision).items():
+                parents.setdefault(dependency, set()).add(version)
+                edges.append((version, dependency))
+                pending.append(dependency)
+        return revisions, versions, parents, edges
+
+    def _path_solution(self, root, constraints, ceilings):
+        # Each frame holds choices to try. Re-expansion after a parent change
+        # follows its newly selected path forward before checking another bound.
+        stack = [iter([{}])]
+        seen = set()
+        while stack:
+            try:
+                choices = next(stack[-1])
+            except StopIteration:
+                stack.pop()
+                continue
+            revisions, versions, parents, edges = self._expand(root, choices, ceilings)
+            signature = tuple(sorted(revisions.items()))
+            if signature in seen:
+                continue
+            seen.add(signature)
+            conflict = next((name for name in sorted(versions)
+                             if len(versions[name]) > 1
+                             or (name in constraints and versions[name] != {constraints[name]})), None)
+            if conflict is None:
+                return DependencyResolution(root, DataEdgeGraph(edges), revisions)
+            target = constraints.get(conflict, min(versions[conflict]))
+            wrong = [(conflict, value) for value in sorted(versions[conflict], reverse=True)
+                     if value != target]
+
+            # Walk backwards from the conflict to every immediate consumer,
+            # then to their parents. A DAG may have several paths to repair.
+            pending = deque(wrong)
+            visited, consumers = set(wrong), []
+            while pending:
+                version = pending.popleft()
+                for parent in sorted(parents.get(version, ())):
+                    if parent in visited:
+                        continue
+                    visited.add(parent)
+                    pending.append(parent)
+                    if parent != root[:2]:  # The caller owns root-history search.
+                        consumers.append(parent)
+            stack.append(self._path_alternatives(consumers, revisions, constraints | {conflict: target}))
+        return None
+
+    def _path_alternatives(self, consumers, revisions, constraints):
+        for parent in consumers:
+            maximum = revisions[parent][2]
+            # counts probes zero and bounds matching immediate inputs. If even
+            # zero is too high, its verified interval is empty: step back to
+            # the next parent rather than searching an unrelated branch.
+            for count in self.counts(parent, maximum, constraints):
+                if count != maximum:
+                    yield revisions | {parent: (*parent, count)}
+
+    def _enumerate_solutions(self, root, *, constraints=None, ceilings=None) -> Iterator[DependencyResolution]:
         constraints = constraints or {}
         ceilings = ceilings or {}
 
