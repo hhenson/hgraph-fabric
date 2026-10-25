@@ -318,7 +318,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
                     self.manager.get_consistent_cut(), {("a", expected), ("b", 1)}
                 )
 
-    def test_history_search_stops_at_newest_exact_match(self):
+    def test_history_search_probes_zero_and_selects_newest_exact_match(self):
         for count in range(128):
             self.add_revision("source", count + 1)
             self.add_revision("a", 9000, count, dependencies=(("source", count + 1),))
@@ -333,7 +333,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             args[0] for args, _ in self.cache.get_revision.call_args_list
             if args[0][0] == "a"
         ]
-        self.assertEqual(min(revision[2] for revision in root_loads), 19)
+        self.assertEqual(list(dict.fromkeys(root_loads))[:2], [("a", 9000, 127), ("a", 9000, 0)])
 
     def test_absence_is_fallback_when_exact_match_cannot_form_a_cut(self):
         for data_id, versions in (("x", (2, 3)), ("y", (1, 2))):

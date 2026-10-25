@@ -107,11 +107,14 @@ class DataSubscriptionManager:
     def _try_advance(self, subscription: DataSubscriptionGraph) -> set[DataVersionId]:
         current = {key: sub.current_revision for key, sub in self._subscriptions.items()}
         subscriptions = tuple(self._subscriptions.values())
-        self._prepare_proposals(subscriptions)
-        updated = subscriptions.index(subscription)
+        established = current == self._consistent_revisions
         self._pending_cuts.pop(subscription.data_id, None)
+        if established and subscription.current_revision == subscription.latest_revision:
+            return set()  # This root cannot drive an advance.
+        self._prepare_proposals(subscriptions, updating=established)
+        updated = subscriptions.index(subscription)
         try:
-            if current != self._consistent_revisions:
+            if not established:
                 # Without a validated existing cut there is no stable set to reuse.
                 accepted = self._stabilize(subscriptions, [], list(range(len(subscriptions))), updated)
             else:
@@ -229,12 +232,23 @@ class DataSubscriptionManager:
             if not self._conflicts[version] or version not in self._dependents:
                 del self._conflicts[version]
 
-    def _prepare_proposals(self, subscriptions: tuple[DataSubscriptionGraph, ...]) -> None:
+    def _prepare_proposals(
+        self, subscriptions: tuple[DataSubscriptionGraph, ...], *, updating: bool = False,
+    ) -> None:
         for sub in subscriptions:
             if sub.latest_revision is None:
                 raise LookupError(f"No latest revision is selected for {sub.data_id!r}")
         for sub in subscriptions:
-            sub.reset_proposal()
+            # A previous cut may have selected older intermediate revisions
+            # even without a subsequent notification. Those choices must be
+            # reconsidered so a stable root cannot hold back a waiting peer.
+            reuse_current = (
+                updating and sub.current_revision == sub.latest_revision
+                and sub.data_id not in self._dirty_subscriptions
+                and all(self._cache.peek_latest_revision(version) == revision
+                        for version, revision in sub.current_dependency_revisions.items())
+            )
+            sub.reset_proposal(reuse_current=reuse_current)
 
     def _commit_proposals(self, subscriptions: tuple[DataSubscriptionGraph, ...]) -> None:
         # Even a single subscription must expand its full proposed tree. Do all
@@ -296,8 +310,9 @@ class DataSubscriptionManager:
         return changed
 
     def _advance_cut(self, subscriptions: tuple[DataSubscriptionGraph, ...], updated: int) -> bool:
-        # First compare only the updated item against everyone else's latest
-        # proposal. Other pairs are deferred until we know it can advance.
+        # Waiting roots propose latest; at-latest roots reuse committed trees
+        # when their intermediate choices are already latest too.
+        # Other pairs are deferred until we know the updated root can advance.
         if self._rejected(subscriptions, updated):
             return False
         others = [i for i in range(len(subscriptions)) if i != updated]

@@ -81,7 +81,8 @@ class ConsistentCutTests(unittest.TestCase):
         a = self.subscription(("a", 100, 3))
         b = self.subscription(self.record("b", 200, dependencies=(("x", 1), ("y", 1))))
         self.assertEqual(find_consistent_cut(a, b, self.cache), (("a", 100, 2), ("b", 200, 0)))
-        self.assertNotIn(call(("a", 100, 1)), self.cache.get_revision.call_args_list)
+        self.assertEqual(a._proposed_resolution.nodes["x"], 1)
+        self.assertEqual(a._proposed_resolution.nodes["y"], 1)
 
     def test_matching_first_node_can_require_moving_backward_for_another(self):
         values = ((0, 0), (1, 0), (1, 1), (1, 2), (2, 2), (2, 3), (2, 4))
@@ -238,7 +239,7 @@ class ConsistentCutTests(unittest.TestCase):
             find_consistent_cut(a, b, self.cache)
         self.assertEqual((a.proposed_revision, b.proposed_revision), before)
 
-    def test_newest_exact_match_returns_without_reading_older_counts(self):
+    def test_root_history_probes_zero_before_selecting_newest_exact_match(self):
         for count in range(128):
             self.record("a", 1000, count, (("x", count),))
         a = self.subscription(("a", 1000, 127))
@@ -246,7 +247,10 @@ class ConsistentCutTests(unittest.TestCase):
         self.assertEqual(find_consistent_cut(a, b, self.cache), (("a", 1000, 20), ("b", 2000, 0)))
         loads = [args[0] for args, _ in self.cache.get_revision.call_args_list
                  if args[0][0] == "a"]
-        self.assertEqual(set(loads), {("a", 1000, count) for count in range(20, 128)})
+        # Zero is probed before indexing the immutable immediate records.
+        # Index reads establish ordering; they are not selected root candidates.
+        self.assertEqual(list(dict.fromkeys(loads))[:2], [("a", 1000, 127), ("a", 1000, 0)])
+        self.assertEqual(a._proposed_resolution.root, ("a", 1000, 20))
 
     def test_missing_selection_raises(self):
         a = self.subscription(self.record("a", 100))

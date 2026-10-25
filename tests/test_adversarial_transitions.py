@@ -518,6 +518,6 @@ class DeepTransitionTests(unittest.TestCase):
                         self.assertEqual(result, (("a", 100, expected), ("b", 100, 0)))
                     loaded_counts = [revision[2] for kind, revision in cache.loads
                                      if kind == "revision" and revision[0] == "a"]
-                    # Exact matches terminate immediately; omissions require
-                    # proving there is no exact match throughout the bound.
-                    self.assertEqual(min(loaded_counts), exact if exact is not None else floor)
+                    # The zero/floor probe bounds the search even when an exact
+                    # match is newer. Metadata indexing must never cross current.
+                    self.assertEqual(min(loaded_counts), floor)

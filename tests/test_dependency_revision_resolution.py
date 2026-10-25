@@ -195,6 +195,130 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
         self.assertEqual(a.current_dependency_revisions, choices)
         self.assertEqual(reader.nodes()['x'], 3)
 
+    def test_parent_backtracking_does_not_search_unrelated_branch_history(self):
+        for order in permutations(('a', 'b')):
+            with self.subTest(order=order):
+                world = World()
+                source = world.process('source')
+                source.publish('x', 1)
+                source.publish('y', 1)
+                middle = world.process('middle', ['x'])
+                middle.publish('m', 100)
+                parent = world.process('parent', ['m'])
+                parent.publish('p', 400)
+                unrelated = world.process('unrelated', ['y'])
+                unrelated.publish('z', 500)
+                producer = world.process('a', ['p', 'z'])
+                producer.publish('a', 600)
+                source.publish('x', 3)
+                middle.publish('m')
+                world.process('b', ['x']).publish('b', 100)
+                source.publish('x', 7)
+                middle.publish('m')
+                source.publish('x', 9)
+                middle.publish('m', 200)
+                parent.publish('p')
+                for version in (11, 13):
+                    source.publish('x', version)
+                    middle.publish('m')
+                source.publish('y', 2)
+                unrelated.publish('z')
+
+                reader = world.process('reader', order)
+                choices = reader.subscriptions['a'].current_dependency_revisions
+                self.assertEqual(reader.cut()['a'], ('a', 600, 0))
+                self.assertEqual(choices[('p', 400)], ('p', 400, 0))
+                self.assertEqual(choices[('m', 100)], ('m', 100, 1))
+                self.assertEqual(choices[('z', 500)], ('z', 500, 1))
+                reads = [key for kind, key in reader.cache.loads if kind == 'revision']
+                # M@200/r0 is too high. Walk back to P, then forward through
+                # its older M reference and probe M@100/r0 before matching r1.
+                self.assertLess(reads.index(('m', 200, 0)), reads.index(('p', 400, 0)))
+                self.assertLess(reads.index(('p', 400, 0)), reads.index(('m', 100, 0)))
+                self.assertNotIn(('z', 500, 0), reads)
+
+    def test_path_search_reaches_subscribed_parent_across_sparse_versions(self):
+        for order in permutations(('a', 'b')):
+            with self.subTest(order=order):
+                world = World()
+                source, middle, producer, peer = world.history()
+                source.publish('x', 9)
+                middle.publish('m', 200)
+                producer.publish('a', 900)
+                for version in (11, 13):
+                    source.publish('x', version)
+                    middle.publish('m')
+                reader = world.process('reader', order)
+                self.assertEqual(reader.cut()['a'], ('a', 200, 0))
+                self.assertEqual(reader.nodes()['x'], 3)
+                self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)], ('m', 100, 1))
+                reads = [key for kind, key in reader.cache.loads if kind == 'revision']
+                self.assertLess(reads.index(('m', 200, 0)), reads.index(('m', 100, 0)))
+                self.assertIn(('a', 900, 0), reads)  # Its stored link reaches A@200.
+
+    def test_shared_conflict_requires_repairing_both_parent_paths(self):
+        world = World()
+        source = world.process('source')
+        source.publish('x', 1)
+        middle = world.process('middle', ['x'])
+        middle.publish('m', 100)
+        parents = [world.process(key, ['m']) for key in ('p', 'q')]
+        for parent in parents:
+            parent.publish(parent.name, 400)
+        world.process('a', ['p', 'q']).publish('a', 600)
+        source.publish('x', 3)
+        middle.publish('m')
+        world.process('b', ['x']).publish('b', 100)
+        source.publish('x', 7)
+        middle.publish('m')
+        source.publish('x', 9)
+        middle.publish('m', 200)
+        for parent in parents:
+            parent.publish(parent.name)
+        reader = world.process('reader', ['a', 'b'])
+        choices = reader.subscriptions['a'].current_dependency_revisions
+        self.assertEqual(choices[('p', 400)], ('p', 400, 0))
+        self.assertEqual(choices[('q', 400)], ('q', 400, 0))
+        self.assertEqual(choices[('m', 100)], ('m', 100, 1))
+        self.assertNotIn(('m', 200), choices)
+        self.assertEqual(reader.nodes()['x'], 3)
+
+    def test_path_match_checks_all_shared_inputs_and_keeps_newest_matching_count(self):
+        for peer_inputs, expected_count in ((['x'], 2), (['x', 'y'], 1)):
+            with self.subTest(peer_inputs=peer_inputs):
+                world = World()
+                source = world.process('source')
+                source.publish('x', 1)
+                source.publish('y', 1)
+                middle = world.process('middle', ['x', 'y'])
+                middle.publish('m', 100)
+                world.process('a', ['m']).publish('a', 200)
+                source.publish('x', 3)
+                middle.publish('m')
+                world.process('b', peer_inputs).publish('b', 400)
+                source.publish('y', 2)
+                middle.publish('m')
+                source.publish('x', 7)
+                middle.publish('m')
+                reader = world.process('reader', ['a', 'b'])
+                self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)],
+                                 ('m', 100, expected_count))
+                self.assertEqual(reader.nodes()['x'], 3)
+
+    def test_parent_search_on_update_keeps_current_then_advances_when_peer_catches_up(self):
+        world = World()
+        source, middle, producer, peer = world.history()
+        reader = world.process('reader', ['a', 'b'])
+        before = reader.cut()
+        source.publish('x', 9)
+        middle.publish('m', 200)
+        producer.publish('a', 900)
+        self.assertEqual(reader.cut(), before)
+        self.assertEqual(reader.nodes()['x'], 3)
+        peer.publish('b', 800)
+        self.assertEqual(reader.cut(), {'a': ('a', 900, 0), 'b': ('b', 800, 0)})
+        self.assertEqual(reader.nodes()['x'], 9)
+
     def test_binary_count_bounds_use_immediate_records(self):
         world = World()
         source = world.process('source')

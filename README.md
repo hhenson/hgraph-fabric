@@ -68,10 +68,14 @@ of this contract.
 
 Tree refresh and cut advancement are separate. When the gate skips a search,
 committed roots and their resolved graphs remain unchanged. The next attempt
-starts with latest candidates and compares changed intermediate choices too.
-With an established cut, it sets proposals to latest and first compares the
-updated item against every other item, rechecking earlier matches if its proposal
-changes. If that proposal drops to its committed current (or below), it stops
+starts waiting roots at latest. Roots already at latest reuse their committed
+graphs as the stable starting set when their intermediate choices are still
+latest. Their root revisions stay fixed, while their intermediate revision
+choices can still change to resolve a comparison. An
+at-latest root does not drive an upgrade attempt. With an established cut, the
+manager first compares the updated item against every other item, rechecking
+earlier matches if its proposal changes. If that proposal drops to its committed
+current (or below), it stops
 immediately and retains the existing cut. The update must also leave every other
 subscription at or above its committed current. These currents are inclusive
 search bounds: an exact match below current cannot displace a valid omission
@@ -96,12 +100,24 @@ intermediate revision choices within their referenced data versions. For example
 the proposal and committed together with the roots. Later comparisons in the
 same attempt cannot raise an intermediate count already lowered by a comparison.
 
+Search identifies the conflicting shared dataset and retains the parent links
+on every path to it. On the leading path it steps back to the immediate
+consumer, probes revision zero, and bounds matching counts within that data
+version. If no count matches, it steps back to the parent that selected that
+version, tries an earlier record, and follows the revised path forward.
+Every resulting graph is checked again for all shared conflicts. A successful
+path search leaves unrelated branch histories untouched; the general search
+remains available for joint alternatives and exact matches after omissions.
+
 Within one version, a search-local index checks immutable immediate-dependency
 membership and ordering. For stable, ordered records, binary lower/upper bounds
 narrow the counts that can match constrained immediate inputs. Creating the index
 reads the records; this does not claim logarithmic storage reads. Changing
 membership or unordered records retain the general newest-first search.
 Descendant expansions through latest revisions are not used as ordering keys.
+When the search reaches a subscribed root, it uses the same count bounds and
+follows revision-zero links to previous data versions. During updates, the
+committed root remains the lower bound; rejected proposals leave current intact.
 
 Only after intermediate resolution fails does root history search follow
 revision-zero links across sparse versions. Exact alignments take precedence over

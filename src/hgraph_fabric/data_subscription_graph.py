@@ -104,9 +104,14 @@ class DataSubscriptionGraph:
                 self._proposed_ceilings[version] = min(
                     self._proposed_ceilings.get(version, revision[2]), revision[2])
 
-    def reset_proposal(self) -> None:
+    def reset_proposal(self, *, reuse_current: bool = False) -> None:
         self.proposed_revision = self.latest_revision
-        self._proposed_resolution = None
+        # An at-latest root starts with its already coherent tree. Keep the
+        # intermediate revision choices available for resolution with peers.
+        self._proposed_resolution = (
+            self._current_resolution
+            if reuse_current and self.current_revision == self.latest_revision else None
+        )
         self._proposed_ceilings = {}
 
     def commit_proposal(self, cache: DataCache) -> None:
