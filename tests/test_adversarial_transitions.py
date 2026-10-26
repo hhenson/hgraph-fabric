@@ -51,8 +51,32 @@ class Stream:
             self.case.assertEqual(manager._dependents, expected)
             waiting = {key for key, sub in manager._subscriptions.items()
                        if sub.current_revision != sub.latest_revision}
+            historical = set()
+            records_by_version = {}
+            for revision, record in self.history.records.items():
+                records_by_version.setdefault(revision[:2], []).append(record)
+            for root, versions in manager._historical_conflicts.items():
+                sub = manager._subscriptions[root[0]]
+                self.case.assertLessEqual(sub.current_revision, root)
+                self.case.assertLessEqual(root, sub.latest_revision)
+                # Independently check reachability through raw historical
+                # records, rather than accepting arbitrary extra watch entries.
+                pending = list(self.history.records[root].dependencies or ())
+                reachable = set()
+                while pending:
+                    version = pending.pop()
+                    if version in reachable:
+                        continue
+                    reachable.add(version)
+                    for record in records_by_version[version]:
+                        pending.extend(record.dependencies or ())
+                self.case.assertLessEqual(versions.keys(), reachable)
+                for version, observed in versions.items():
+                    self.case.assertIn(observed, self.history.records)
+                    self.case.assertEqual(version, observed[:2])
+                historical.update(versions)
             for version, roots in manager._conflicts.items():
-                self.case.assertIn(version, expected)
+                self.case.assertIn(version, expected.keys() | historical)
                 self.case.assertTrue(roots)
                 self.case.assertLessEqual(roots, waiting)
             before = {version: roots.copy() for version, roots in manager._conflicts.items()}
@@ -63,7 +87,10 @@ class Stream:
         before = [current_cut(manager) for manager in self.managers]
         eligible = []
         for manager in self.managers:
-            dependents = manager._dependents.get((update.id, update.revision[0]), set())
+            version = (update.id, update.revision[0])
+            dependents = manager._dependents.get(version, set()) | {
+                root[0] for root, versions in manager._historical_conflicts.items() if version in versions
+            }
             eligible.append(
                 update.id in manager._subscriptions
                 or ((update.id, update.revision[0]) in manager._conflicts

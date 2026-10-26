@@ -52,16 +52,33 @@ version, excluding the mismatched endpoint and IDs already subscribed. For
 `A -> Y` versus `B -> M -> Y`, only M needs a soft revision watch: A and B
 already receive subscription updates, and revising Y cannot change its version.
 
+The search also retains consumer paths from rejected historical candidates.
+An intermediate's latest record can omit a dependency that an older, still
+admissible record uses. A new revision of that historical dependency may then
+enable a forward cut without another notification for the intermediate or
+subscribed root. These watches are keyed by the root candidate and exact
+dependency version; they supplement the current/latest dependency index.
+See the [publication-and-delivery counterexample](tests/HISTORICAL_CONFLICT_REVIEW.md).
+
 An unsubscribed dependency update attempts advancement only if that exact version
-has a recorded conflict, at least two subscriptions depend on it, and an affected
+has a recorded conflict, at least two subscriptions depend on it through indexed
+trees or retained historical conflict paths, and an affected
 subscription is behind latest. Unrelated branches, other data versions and
 duplicate notifications do not trigger searches. A still-blocked root does not
 prevent another affected root from driving a retry. One complete proposed cut is
-committed per notification. `cleanup_conflicts()` retires caught-up roots and
-versions absent from all current/latest trees. It runs automatically after each
-completed update (including a blocked update) and initial cut, and can also be
+committed per notification. The gate counts the dependents recorded before the
+notification changes paths; the new records are used to resolve the cut. Removing
+a dependency can be what unblocks progress, so refreshed indexes or retired
+watches must not retroactively disqualify that notification.
+`cleanup_conflicts()` runs after the attempt and retires caught-up roots and
+historical paths whose root candidates fall below current. A watch can also
+retire when cached revision-zero links prove its version's final count has
+already been observed. An outstanding final revision remains watched even if
+its notification follows a successor version. Versions with neither indexed
+dependents nor admissible historical conflict paths are retired. Cleanup runs
+after each completed update (including a blocked update) and initial cut, and can also be
 called explicitly. Live conflicts remain tracked while roots are waiting.
-Affected waiting roots come from the dependency index, including those downgraded
+Affected waiting roots come from the dependency index and historical path owners, including those downgraded
 onto a tracked path by later comparisons. Unexpected errors propagate to the
 caller and are fatal to processing; recovery and replay after errors are not part
 of this contract.

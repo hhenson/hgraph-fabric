@@ -4,7 +4,7 @@ from enum import Enum, auto
 from .data_cache import DataCache
 from .dependency_resolution import RevisionSearch
 from .data_graph import DataEdgeGraph
-from .data_structures import DataId, DataRevisionId, DataVersion
+from .data_structures import DataId, DataRevisionId, DataVersion, DataVersionId
 from .data_subscription_graph import DataSubscriptionGraph
 
 
@@ -24,6 +24,7 @@ def find_consistent_cut(
     cache: DataCache,
     *,
     lower_bounds: tuple[DataRevisionId | None, DataRevisionId | None] = (None, None),
+    conflict_paths: dict[DataRevisionId, set[DataVersionId]] | None = None,
 ) -> tuple[DataRevisionId, DataRevisionId]:
     """Return consistent (left revision, right revision), in argument order.
 
@@ -52,6 +53,8 @@ def find_consistent_cut(
     Updates supply committed currents as inclusive lower bounds. An exact
     match below current is not a candidate: prefer an omission at current to
     rolling back already delivered data. Initialization leaves these unbounded.
+    If supplied, conflict_paths collects consumer versions from rejected paths,
+    keyed by the root candidate that reached them, for notification watches.
     """
     if left.proposed_revision is None or right.proposed_revision is None:
         raise LookupError("Both subscriptions need a proposed revision")
@@ -64,7 +67,7 @@ def find_consistent_cut(
             if revision < floor:
                 raise NoConsistentCutError("Proposed revision is below its lower bound")
     left_graph, right_graph = left.proposed_graph(cache), right.proposed_graph(cache)
-    search = RevisionSearch(cache)
+    search = RevisionSearch(cache, conflict_paths=conflict_paths)
     common = _nodes(left_graph, left_revision).keys() & _nodes(right_graph, right_revision).keys()
     resolved, aligned = _resolve_dependencies(left, right, left_revision, right_revision, common, search)
     if aligned is _Comparison.EXACT:
@@ -133,7 +136,8 @@ def find_consistent_cut(
     # Only after the normal search fails do we allow both sides to move. Retain
     # argument order and the original proposed upper bounds throughout.
     joint = _search_both_histories(
-        leading, fixed, start, fixed_revision, common, cache, leading_floor, lower_bounds[1 if leading_is_left else 0]
+        leading, fixed, start, fixed_revision, common, cache, leading_floor,
+        lower_bounds[1 if leading_is_left else 0], conflict_paths=conflict_paths,
     )
     return joint if leading_is_left else joint[::-1]
 
@@ -147,6 +151,7 @@ def _search_both_histories(
     cache: DataCache,
     leading_floor: DataRevisionId | None = None,
     fixed_floor: DataRevisionId | None = None,
+    *, conflict_paths=None,
 ) -> tuple[DataRevisionId, DataRevisionId]:
     """Rare exhaustive fallback; prefer retaining the formerly fixed side.
 
@@ -156,7 +161,7 @@ def _search_both_histories(
     affect the normal one-sided search. Metadata failures propagate.
     """
     absent = None
-    search = RevisionSearch(cache)
+    search = RevisionSearch(cache, conflict_paths=conflict_paths)
     for fixed_revision in _revisions_backwards(fixed_start, cache, fixed_floor, search):
         fixed_inputs = search.record(fixed_revision) | {fixed_revision[0]: fixed_revision[1]}
         for leading_revision in _revisions_backwards(leading_start, cache, leading_floor, search, fixed_inputs):
@@ -188,6 +193,10 @@ def _resolve_dependencies(left, right, left_revision, right_revision, common, se
     if left_revision == left.proposed_revision and right_revision == right.proposed_revision:
         a, b = left.proposal(search.cache), right.proposal(search.cache)
         comparison = _compare_candidates(left_revision, a.nodes, right_revision, b.nodes, common)
+        if comparison is _Comparison.CONFLICT:
+            conflicts = {key for key in a.nodes.keys() & b.nodes.keys() if a.nodes[key] != b.nodes[key]}
+            search.watch_conflict_paths(left_revision, conflicts, a.graph)
+            search.watch_conflict_paths(right_revision, conflicts, b.graph)
         if comparison is _Comparison.EXACT:
             return (a, b), comparison
 
