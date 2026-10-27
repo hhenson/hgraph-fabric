@@ -43,7 +43,7 @@ class StableRootUpdateTests(unittest.TestCase):
         for key, graph in graphs.items():
             self.assertIs(reader.subscriptions[key].current(reader.cache), graph)
             self.assertEqual(reader.subscriptions[key].current_revision, reader.subscriptions[key].latest_revision)
-        self.assertEqual(reader.cut()['b'], ('b', 500, 0))
+        self.assertEqual(reader.cut()['b'], ('b', 2, 0))
         self.assertEqual(reader.nodes()['x'], 1)
 
     def test_fixed_latest_roots_recheck_pairs_when_intermediate_choices_change(self):
@@ -63,9 +63,9 @@ class StableRootUpdateTests(unittest.TestCase):
             sub = reader.subscriptions[key]
             self.assertEqual(sub.current_revision, before[key])
             self.assertEqual(sub.current_revision, sub.latest_revision)
-            self.assertEqual(sub.current_dependency_revisions[('m', 100)], ('m', 100, 4))
-        self.assertEqual(reader.cut()['b'], ('b', 300, 0))
-        self.assertEqual(reader.nodes()['x'], 9)
+            self.assertEqual(sub.current_dependency_revisions[('m', 1)], ('m', 1, 4))
+        self.assertEqual(reader.cut()['b'], ('b', 2, 0))
+        self.assertEqual(reader.nodes()['x'], 5)
 
     def test_fixed_root_reconsiders_older_choices_without_a_new_dependency_notification(self):
         world = World()
@@ -76,17 +76,17 @@ class StableRootUpdateTests(unittest.TestCase):
         manager = reader.session._subscriptions
         a = reader.subscriptions['a']
         self.assertEqual(a.current_revision, a.latest_revision)
-        self.assertEqual(a.current_dependency_revisions[('m', 100)], ('m', 100, 1))
-        self.assertEqual(reader.cut()['b'], ('b', 100, 0))
+        self.assertEqual(a.current_dependency_revisions[('m', 1)], ('m', 1, 1))
+        self.assertEqual(reader.cut()['b'], ('b', 1, 0))
         self.assertEqual(manager._dirty_subscriptions, set())
         # D restarts without its B dependency. M/r3 was already available at
         # initialisation: no new M notification will mark A's tree dirty.
         source.publish('d', 200)
-        self.assertEqual(a.current_revision, ('a', 200, 0))
-        self.assertEqual(a.current_dependency_revisions[('m', 100)], ('m', 100, 3))
-        self.assertEqual(reader.cut()['b'], ('b', 300, 0))
-        self.assertEqual(reader.cut()['d'], ('d', 200, 0))
-        self.assertEqual(reader.nodes()['x'], 7)
+        self.assertEqual(a.current_revision, ('a', 1, 0))
+        self.assertEqual(a.current_dependency_revisions[('m', 1)], ('m', 1, 3))
+        self.assertEqual(reader.cut()['b'], ('b', 2, 0))
+        self.assertEqual(reader.cut()['d'], ('d', 2, 0))
+        self.assertEqual(reader.nodes()['x'], 4)
 
 
 if __name__ == '__main__':

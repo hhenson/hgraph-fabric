@@ -35,16 +35,26 @@ class MemoryDataCache(DataCache):
         self.loads.append(("revision", revision_id))
         return self.revision_values[revision_id]
 
+    def reserve_write(self, data_id, previous):
+        if self.latest_values.get(data_id) != previous:
+            raise RuntimeError("Publication head changed")
+
     def write_version(self, version_id, data):
         self.writes.append(("version", version_id, data))
+        if version_id in self.data_values:
+            raise FileExistsError(version_id)
         self.data_values[version_id] = data
 
     def write_revision(self, revision_id, details):
         self.writes.append(("revision", revision_id, details))
+        if revision_id in self.revision_values:
+            raise FileExistsError(revision_id)
         self.revision_values[revision_id] = details
 
-    def write_latest(self, data_id, details):
+    def write_latest(self, data_id, details, previous):
         self.writes.append(("latest", data_id, details))
+        if self.latest_values.get(data_id) != previous:
+            raise RuntimeError("Publication head changed")
         self.latest_values[data_id] = (data_id, *details.revision)
 
 

@@ -129,13 +129,16 @@ class HistoryCache(DataCache):
     def load_version(self, version):
         raise AssertionError("Metadata search must not load dataframe payloads")
 
+    def reserve_write(self, data_id, previous):
+        raise NotImplementedError
+
     def write_version(self, version_id, data):
         raise AssertionError("Metadata search must not write data")
 
     def write_revision(self, revision_id, details):
         raise AssertionError("Metadata search must not write revisions")
 
-    def write_latest(self, data_id, details):
+    def write_latest(self, data_id, details, previous):
         raise AssertionError("Metadata search must not write latest")
 
 

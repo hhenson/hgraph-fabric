@@ -154,7 +154,7 @@ class PollingDataFabricSession(DataFabricSession):
         as_of: datetime | None = None,
     ) -> tuple[Table, DataUpdateDetails]:
         """Persist before sending; local subscriptions advance through poll()."""
-        previous = self._cache.latest(id) if data is None and id is not None else None
+        previous = self._cache.load_latest(id) if data is None and id is not None else None
         data, update = super().publish(data, id, dependencies, weak_dependencies, as_of)
         if previous != (update.id, *update.revision):
             self._transport.send(update)

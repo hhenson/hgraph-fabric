@@ -1,7 +1,8 @@
 # Historical conflict-path notification review
 
-Baseline: `1636cbc` (PR #38). A dependency notification could leave a waiting cut
-unchanged even though repeating the search immediately found a forward cut.
+Baseline: `1636cbc` (PR #38). Version labels below follow the consecutive
+allocation now used by the publication fixture. A dependency notification could
+leave a waiting cut unchanged even though repeating the search immediately found a forward cut.
 The reproduction uses `DataFabricSession.publish`, persistent records shared
 by independent caches, and coordinated notification delivery. No records are
 deleted, no current revisions are assigned by the test, and no producer
@@ -9,36 +10,36 @@ publishes a decreasing input version.
 
 ## Publication sequence
 
-1. Publish X@3 and G@100 accepting X@3. M's producer subscribes to X and G,
-   then publishes M@100/r0 accepting X@3 and G@100. N@100/r0 accepts M@100.
-   Publish dependency-free A@100 and C@100.
-2. Publish X@7 and G@200 accepting X@7. M's input cut advances to X@7/G@200,
-   but it has not published another revision yet. B@400 accepts X@7.
-3. Publish X@9. M remains at X@7/G@200 because G still requires X@7.
-   Restart N with a direct X subscription and publish N@100/r1 accepting X@9.
-   A@200 and C@200 each accept N@100.
-4. A reader subscribes to A, C and B. N/r1 reaches X@9, while N/r0 through
-   M/r0 reaches X@3. Neither agrees with B's X@7. The reader selects
-   A@100, C@100 and B@400.
-5. M publishes M@100/r1 accepting its actual X@7/G@200 input cut. This changes
+1. Publish X@1 and G@1 accepting X@1. M's producer subscribes to X and G,
+   then publishes M@1/r0 accepting X@1 and G@1. N@1/r0 accepts M@1.
+   Publish dependency-free A@1 and C@1.
+2. Publish X@2 and G@2 accepting X@2. M's input cut advances to X@2/G@2,
+   but it has not published another revision yet. B@1 accepts X@2.
+3. Publish X@3. M remains at X@2/G@2 because G still requires X@2.
+   Restart N with a direct X subscription and publish N@1/r1 accepting X@3.
+   A@2 and C@2 each accept N@1.
+4. A reader subscribes to A, C and B. N/r1 reaches X@3, while N/r0 through
+   M/r0 reaches X@1. Neither agrees with B's X@2. The reader selects
+   A@1, C@1 and B@1.
+5. M publishes M@1/r1 accepting its actual X@2/G@2 input cut. This changes
    only M's dependency record. N's latest record no longer consumes M, so no
    new N publication is needed or produced.
 
-The coherent forward cut is now A@200, C@200 and B@400, using:
+The coherent forward cut is now A@2, C@2 and B@1, using:
 
 ```text
-A@200/r0 -> N@100/r0 -> M@100/r1 -> X@7
-C@200/r0 -> N@100/r0 -> M@100/r1 -> G@200/r0 -> X@7
-B@400/r0 -> X@7
+A@2/r0 -> N@1/r0 -> M@1/r1 -> X@2
+C@2/r0 -> N@1/r0 -> M@1/r1 -> G@2/r0 -> X@2
+B@1/r0 -> X@2
 ```
 
 These arrows follow dependency discovery from consumer to input. M's record
-contains both X@7 and G@200; the two displayed paths abbreviate the shared graph.
-N/r0 records M's data version 100, not a pinned M revision count.
+contains both X@2 and G@2; the two displayed paths abbreviate the shared graph.
+N/r0 records M's data version 1, not a pinned M revision count.
 
 ## Why watching only the visible paths failed
 
-The baseline watched N@100 from the latest conflict paths. M@100 was absent
+The baseline watched N@1 from the latest conflict paths. M@1 was absent
 from both current and latest expansions: the currents were dependency-free,
 and N's latest record used X directly. Although search inspected the older
 N/r0 -> M path, the manager discarded that information. It cached M's later

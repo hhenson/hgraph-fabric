@@ -62,7 +62,7 @@ class NotificationStartupTests(unittest.TestCase):
                 sub = self.session.add_subscription("a")
             self.assertIs(self.session.poll(0)["a"], old)
             self.assertIs(self.session.poll(0)["a"], updates[0])
-            self.assertEqual(sub.current_revision, ("a", 200, 0))
+            self.assertEqual(sub.current_revision, ("a", 2, 0))
             self.assertEqual(self.session.poll(0), {})
 
     def test_overlap_with_fresher_image_cannot_regress_latest_or_current(self):
@@ -77,10 +77,10 @@ class NotificationStartupTests(unittest.TestCase):
                 self.transport.send(update)
             while self.transport.updates:
                 self.assertEqual(self.session.poll(0), {})
-                self.assertEqual(sub.latest_revision, ("a", 200, 0))
-                self.assertEqual(sub.current_revision, ("a", 200, 0))
+                self.assertEqual(sub.latest_revision, ("a", 2, 0))
+                self.assertEqual(sub.current_revision, ("a", 2, 0))
             self.assertIs(self.session.get_consistent_cut()["a"], latest)
-            self.assertEqual(self.reader.latest("a"), ("a", 200, 0))
+            self.assertEqual(self.reader.latest("a"), ("a", 2, 0))
 
     def test_notifications_arriving_during_table_load_are_not_lost(self):
         old, _ = publish(self.publisher, "a", 100)
@@ -102,15 +102,15 @@ class NotificationStartupTests(unittest.TestCase):
 
     def test_older_revision_count_does_not_regress_root(self):
         _, first = publish(self.publisher, "a", 100)
-        newer = replace(first, revision=(100, 3), previous_revision=None)
+        newer = replace(first, revision=(1, 3), previous_revision=None)
         with self.session:
             sub = self.session.add_subscription("a")
             self.session.poll(0)
-            for update in (newer, first, newer, replace(newer, revision=(100, 1))):
+            for update in (newer, first, newer, replace(newer, revision=(1, 1))):
                 self.transport.send(update)
                 self.assertEqual(self.session.poll(0), {})
-                self.assertEqual(sub.current_revision, ("a", 100, 3))
-                self.assertEqual(sub.latest_revision, ("a", 100, 3))
+                self.assertEqual(sub.current_revision, ("a", 1, 3))
+                self.assertEqual(sub.latest_revision, ("a", 1, 3))
 
     def test_old_dependency_notification_does_not_invalidate_newer_tree(self):
         history = History()

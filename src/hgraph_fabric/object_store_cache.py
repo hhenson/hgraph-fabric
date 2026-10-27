@@ -55,6 +55,10 @@ class ObjectStoreDataCache(DataCache):
         value = json.loads(bytes(self._read(self._path(data_id, "latest.json"), data_id)))
         return (data_id, *_pair(value, int))
 
+    def write_dependencies(self, id, dependencies=(), weak_dependencies=(), as_of=None):
+        _validate_dependency_names(dependencies, weak_dependencies)
+        return super().write_dependencies(id, dependencies, weak_dependencies, as_of)
+
     def load_version(self, version_id: DataVersionId) -> pa.Table:
         data_id, version = version_id
         data = self._read(self._path(data_id, f"versions/{version}.arrow"), version_id)
@@ -72,6 +76,13 @@ class ObjectStoreDataCache(DataCache):
             previous_revision=None if previous is None else _pair(previous, int),
             as_of=datetime.fromisoformat(value["as_of"]),
         )
+
+    def reserve_write(self, data_id: DataId, previous: DataRevisionId | None) -> None:
+        # One immutable claim per predecessor serializes both kinds of write.
+        # Unlike an expiring lease, a suspended writer cannot outlive its claim.
+        head = "initial" if previous is None else f"{previous[1]}-{previous[2]}"
+        path = self._path(data_id, f"publications/{head}.json")
+        obstore.put(self._store, path, json.dumps(previous).encode("utf-8"), mode="create")
 
     def write_version(self, version_id: DataVersionId, data: pa.Table) -> None:
         data_id, version = version_id
@@ -91,7 +102,15 @@ class ObjectStoreDataCache(DataCache):
         obstore.put(self._store, self._path(data_id, f"revisions/{version}/{count}.json"),
                     json.dumps(value, separators=(",", ":")).encode("utf-8"), mode="create")
 
-    def write_latest(self, data_id: DataId, details: LatestDataDetails) -> None:
+    def write_latest(
+        self, data_id: DataId, details: LatestDataDetails, previous: DataRevisionId | None,
+    ) -> None:
+        # The create-only predecessor claim excludes other conforming writers
+        # through this check and the head write, including on LocalStore where
+        # conditional object replacement is unavailable. Never silently rebase
+        # a new version: its header must seal the actual predecessor's final count.
+        if self._publication_head(data_id) != previous:
+            raise RuntimeError(f"Publication head changed for {data_id!r}")
         obstore.put(self._store, self._path(data_id, "latest.json"),
                     json.dumps(details.revision, separators=(",", ":")).encode("utf-8"))
 

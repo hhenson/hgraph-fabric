@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
 from pyarrow import Table
 
@@ -77,8 +77,8 @@ class DataCache(ABC):
         """Write a version, or revise dependencies when no table is supplied.
 
         Explicit id/as_of override schema metadata. Missing as_of uses UTC now;
-        missing version uses as_of in epoch milliseconds (naive times mean UTC).
-        Advance any version not past latest to latest + 1, keeping as_of intact.
+        versions start at 1 and advance by one per dataset, independent of as_of.
+        Input version metadata is replaced by the allocated version.
         Other metadata and the input table are preserved. Callers deliver the
         returned update to their associated subscription managers.
 
@@ -98,18 +98,9 @@ class DataCache(ABC):
         if as_of is None:
             as_of = (datetime.fromisoformat(metadata[b"as_of"].decode("utf-8"))
                      if b"as_of" in metadata else datetime.now(UTC))
-        if b"version" in metadata:
-            version = int(metadata[b"version"])
-        else:
-            timestamp = as_of if as_of.tzinfo is not None else as_of.replace(tzinfo=UTC)
-            version = (timestamp - datetime(1970, 1, 1, tzinfo=UTC)) // timedelta(milliseconds=1)
-
-        try:
-            previous = self.latest(id)
-        except KeyError:
-            previous = None  # Storage signals an unknown data ID with KeyError.
-        if previous is not None:
-            version = max(version, previous[1] + 1)
+        previous = self._publication_head(id)
+        version = 1 if previous is None else previous[1] + 1
+        self.reserve_write(id, previous)
 
         metadata.update({
             b"id": id.encode("utf-8"),
@@ -126,7 +117,7 @@ class DataCache(ABC):
         )
         self.write_version((id, version), data)
         self.write_revision(revision_id, details)
-        self.write_latest(id, LatestDataDetails((version, 0)))
+        self.write_latest(id, LatestDataDetails((version, 0)), previous)
 
         update = DataUpdateDetails(
             id=id, revision=(version, 0), previous_revision=details.previous_revision,
@@ -150,28 +141,38 @@ class DataCache(ABC):
         An as_of-only change is a no-op. The returned table keeps the metadata
         from its version publication; the revision timestamp is in the update.
         """
-        previous = self.latest(id)
+        previous = self._publication_head(id)
+        if previous is None:
+            raise KeyError(id)
         details = self.get_revision(previous)
         data = self.get_version(previous[:2])
         changed = (dependencies != details.dependencies
                    or weak_dependencies != details.weak_dependencies)
         revision_id = previous
         if changed:
+            self.reserve_write(id, previous)
             revision_id = (id, previous[1], previous[2] + 1)
             details = DataRevisionDetails(
                 dependencies=dependencies, weak_dependencies=weak_dependencies,
                 previous_revision=None, as_of=as_of if as_of is not None else datetime.now(UTC),
             )
             self.write_revision(revision_id, details)
-            self.write_latest(id, LatestDataDetails(revision_id[1:]))
+            self.write_latest(id, LatestDataDetails(revision_id[1:]), previous)
         update = DataUpdateDetails(
             id=id, revision=revision_id[1:], previous_revision=details.previous_revision,
             dependencies=details.dependencies, weak_dependencies=details.weak_dependencies,
             as_of=details.as_of,
         )
-        if changed:
-            self.apply_update(update)
+        self._latest[id] = revision_id
+        self.apply_update(update)
         return data, update
+
+    def _publication_head(self, data_id: DataId) -> DataRevisionId | None:
+        # Allocation must use storage, not a potentially stale reader cache.
+        try:
+            return self.load_latest(data_id)
+        except KeyError:
+            return None
 
     def get_latest_revision(self, version_id: DataVersionId) -> DataRevisionId:
         """Walk revision-0 previous-version links from the latest revision."""
@@ -207,8 +208,8 @@ class DataCache(ABC):
                 self._latest_revisions.get(version_id, revision_id),
             )
             yield revision_id
-            # Only revision zero carries the link to the previous sparse
-            # version and its maximum count. Never subtract from a version ID.
+            # Revision zero retains the preceding version and its final count.
+            # The version number alone does not identify that count.
             header_id = (data_id, revision_id[1], 0)
             header = self.peek_revision(header_id) if peek else self.get_revision(header_id)
             if header is None:
@@ -266,6 +267,15 @@ class DataCache(ABC):
         ...
 
     @abstractmethod
+    def reserve_write(self, data_id: DataId, previous: DataRevisionId | None) -> None:
+        """Exclusively claim one successor of the expected head; fail on reuse.
+
+        A claim covers both version and dependency-only writes. Failed claims
+        or writes are fatal; callers must not retry or skip an allocated number.
+        """
+        ...
+
+    @abstractmethod
     def write_version(self, version_id: DataVersionId, data: Table) -> None:
         ...
 
@@ -274,5 +284,8 @@ class DataCache(ABC):
         ...
 
     @abstractmethod
-    def write_latest(self, data_id: DataId, details: LatestDataDetails) -> None:
+    def write_latest(
+        self, data_id: DataId, details: LatestDataDetails, previous: DataRevisionId | None,
+    ) -> None:
+        """Commit under the exclusive claim, verifying the stored expected head."""
         ...

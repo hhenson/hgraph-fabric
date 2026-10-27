@@ -32,13 +32,16 @@ class UpdateOnlyCache(DataCache):
     def load_version(self, version_id):
         raise KeyError(version_id)
 
+    def reserve_write(self, data_id, previous):
+        raise NotImplementedError
+
     def write_version(self, version_id, data):
         raise AssertionError("Update notifications must not write data")
 
     def write_revision(self, revision_id, details):
         raise AssertionError("Update notifications must not write revisions")
 
-    def write_latest(self, data_id, details):
+    def write_latest(self, data_id, details, previous):
         raise AssertionError("Update notifications must not write latest")
 
 

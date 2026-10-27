@@ -137,8 +137,8 @@ follows revision-zero links to previous data versions. During updates, the
 committed root remains the lower bound; rejected proposals leave current intact.
 
 Only after intermediate resolution fails does root history search follow
-revision-zero links across sparse versions. Exact alignments take precedence over
-consistent omissions; both sides' intermediate choices may need to change.
+revision-zero links carrying the preceding version's final count. Exact
+alignments take precedence over consistent omissions; both sides' intermediate choices may need to change.
 Every shared data version must agree, including upstream nodes when one root
 occurs in the other graph. Once that containment is coherent, it counts as an
 exact alignment even if an old shared descendant is no longer present. If the
@@ -178,19 +178,23 @@ malformed history links raise in either form.
 accepts an Arrow table and returns `(written_table, DataUpdateDetails)`. Explicit
 `id` and `as_of` override schema metadata. An ID must be supplied in one of those
 places; missing `as_of` defaults to UTC now. The schema stores UTF-8 `id`, decimal
-`version`, and ISO-format `as_of`. A metadata version is used if present;
-otherwise the version is derived from the resolved `as_of` in epoch milliseconds.
-Naive datetimes are interpreted as UTC for this calculation. Any version not
-greater than latest is advanced to `latest_version + 1`, without changing `as_of`.
+`version`, and ISO-format `as_of`. Versions form a per-dataset sequence starting
+at 1. Each new table gets `latest_version + 1`; input version metadata is replaced.
+`as_of` is preserved independently and does not allocate or order versions.
 Other metadata and the input table are preserved.
 
-Writes create revision zero, linking to the previous latest version and count.
-Storage subclasses implement `write_version(DataVersionId, Table)`,
-`write_revision(DataRevisionId, DataRevisionDetails)`, and
-`write_latest(DataId, LatestDataDetails)`, called in that order. `load_latest`
-raises `KeyError` for a new ID. After successful persistence, the cache retains
-the table and metadata; deliver the returned update to every associated manager
-as part of the coordinated write/notification operation. Storage errors propagate.
+Writes create revision zero, retaining the previous version and its final count.
+Allocation reads `load_latest` from storage, even when a reader head is cached.
+Storage subclasses implement `reserve_write(DataId, previous)`, followed by
+`write_version(DataVersionId, Table)`, `write_revision(DataRevisionId,
+DataRevisionDetails)`, and `write_latest(DataId, LatestDataDetails, previous)`.
+The reservation must exclusively claim a successor of the expected head for
+both table and dependency-only publications. The final head write checks that
+storage still contains that predecessor. `previous` is a full revision ID, or
+`None` for a new dataset. `load_latest` raises `KeyError` for a new ID.
+After successful persistence, the cache retains the table and metadata; deliver
+the returned update to every associated manager as part of the coordinated
+write/notification operation. Storage errors propagate.
 
 Omit the table to update dependencies on the latest version:
 `cache.write(id="prices", dependencies=(("source", 7),))`, or call
@@ -253,13 +257,22 @@ starting and ending with a letter or digit. Windows device names such as `con`,
 case-insensitive filesystems. Invalid names raise `ValueError` before storage
 access; names are never escaped or silently normalised.
 
-Publication writes the table, revision, then latest pointer. Version and revision
-objects are create-only: attempts to reuse them fail rather than overwrite history.
-Use one coordinated writer per data ID; this backend does not add multi-writer
-transactions to `DataCache`. A failed publication can leave unreferenced objects,
-but failures before the head write do not advance latest. Storage errors propagate;
-only missing objects become the cache's `KeyError`. Arrow snapshots are buffered
-in memory for upload.
+Publication first creates an immutable claim under
+`publications/<previous-version>-<previous-count>.json` (or `publications/initial.json`
+for a new dataset). Both kinds of publication compete for the same predecessor
+claim, so a version write cannot race a dependency-only revision unnoticed.
+It then creates the table, if any, and revision, verifies the stored predecessor,
+and writes latest last. History objects and claims are create-only.
+
+Keep one coordinated writer per dataset. These checks detect conflicting writers;
+they do not provide retry, lease takeover or recovery. Claims are retained and do
+not expire: a suspended writer must not resume after a timeout and overwrite a
+successor. A failed publication can leave a claim and unreferenced payloads;
+stop processing and repair explicitly before resuming that dataset. Never skip
+the occupied version to continue. Other datasets remain independent. Only a
+successful head commit can produce a publication notification. Storage errors
+propagate; only missing objects become the cache's `KeyError`. Arrow snapshots
+are buffered in memory for upload.
 
 Readers retain the normal cache semantics: deliver updates to their associated
 managers, or construct a fresh cache to load a new snapshot from storage.

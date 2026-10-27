@@ -4,7 +4,7 @@ from datetime import datetime
 
 type DataNamespace = str
 type DataId = str
-type DataVersion = int  # The int encoded datetime as milliseconds
+type DataVersion = int  # A per-dataset sequence starting at 1
 type DataRevisionCount = int  # A sequence number of revisions for a given version
 type DataRevision = tuple[DataVersion, DataRevisionCount]
 
