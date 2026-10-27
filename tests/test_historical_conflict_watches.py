@@ -120,7 +120,7 @@ class HistoricalConflictWatchTests(unittest.TestCase):
         details = reader.cache.get_revision(('m', 1, 0))
         older = DataUpdateDetails(id='m', revision=(1, 0), dependencies=details.dependencies,
                                   weak_dependencies=details.weak_dependencies,
-                                  previous_revision=details.previous_revision, as_of=details.as_of)
+                                  as_of=details.as_of)
         with patch.object(reader.session._subscriptions, '_try_advance') as retry:
             self.assertEqual(reader.session.apply_update(update), {})
             self.assertEqual(reader.session.apply_update(older), {})

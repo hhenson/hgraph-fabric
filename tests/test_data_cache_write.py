@@ -29,7 +29,7 @@ class DataCacheWriteTests(unittest.TestCase):
             with self.subTest(count=count):
                 as_of = datetime(2026, 10, 21, 12, count, tzinfo=UTC)
                 update = DataUpdateDetails(
-                    id="prices", revision=(7, count), previous_revision=None,
+                    id="prices", revision=(7, count),
                     dependencies=(), weak_dependencies=(), as_of=as_of,
                 )
                 cache.apply_update(update)
@@ -44,7 +44,7 @@ class DataCacheWriteTests(unittest.TestCase):
         self.assertIs(cache.peek_version(("prices", 1)), written)
         self.assertEqual(cache.peek_latest("prices"), ("prices", 1, 0))
         self.assertEqual(cache.peek_latest_revision(("prices", 1)), ("prices", 1, 0))
-        self.assertEqual(cache.peek_revision(("prices", 1, 0)), DataRevisionDetails((), (), None, as_of=as_of))
+        self.assertEqual(cache.peek_revision(("prices", 1, 0)), DataRevisionDetails((), (), as_of=as_of))
         self.assertIsNone(cache.peek_version(("other", 0)))
         self.assertIsNone(cache.peek_version(("prices", 2)))
         self.assertEqual(cache.loads, [])
@@ -60,19 +60,19 @@ class DataCacheWriteTests(unittest.TestCase):
         })
         self.assertTrue(written.equals(original))
         self.assertEqual(original.schema.metadata, {b"custom": b"\xff\x00"})
-        expected = DataUpdateDetails(id="prices", revision=(1, 0), previous_revision=None,
+        expected = DataUpdateDetails(id="prices", revision=(1, 0),
                                      dependencies=(), weak_dependencies=(), as_of=as_of)
         self.assertEqual(update, expected)
         self.assertEqual([entry[:2] for entry in cache.writes], [
             ("version", ("prices", 1)), ("latest_revision", ("prices", 1, 0)), ("latest_version", ("prices", 1)),
         ])
         self.assertIs(cache.writes[0][2], written)
-        self.assertEqual(cache.writes[0][3], DataRevisionDetails((), (), None, as_of=as_of))
+        self.assertEqual(cache.writes[0][3], DataRevisionDetails((), (), as_of=as_of))
         cache.loads.clear()
         self.assertIs(cache.get_version(("prices", 1)), written)
         self.assertEqual(cache.latest("prices"), ("prices", 1, 0))
         self.assertEqual(cache.get_latest_revision(("prices", 1)), ("prices", 1, 0))
-        self.assertEqual(cache.get_revision(("prices", 1, 0)), DataRevisionDetails((), (), None, as_of=as_of))
+        self.assertEqual(cache.get_revision(("prices", 1, 0)), DataRevisionDetails((), (), as_of=as_of))
         self.assertEqual(cache.loads, [])
 
     def test_metadata_supplies_id_and_as_of_but_version_is_allocated(self):
@@ -96,7 +96,7 @@ class DataCacheWriteTests(unittest.TestCase):
             b"id": b"new-id", b"version": b"1", b"as_of": b"1970-01-02T00:00:00+00:00",
         })
         self.assertEqual(update, DataUpdateDetails(
-            id="new-id", revision=(1, 0), previous_revision=None, as_of=as_of,
+            id="new-id", revision=(1, 0), as_of=as_of,
             dependencies=(("source", 100),), weak_dependencies=(("reference", 200),),
         ))
         self.assertEqual(cache.loads, [("latest", "new-id")])
@@ -155,7 +155,7 @@ class DataCacheWriteTests(unittest.TestCase):
                 self.assertEqual(update.revision, (expected, 0))
                 self.assertEqual(update.as_of, as_of)
                 self.assertEqual(cache.get_revision(("prices", expected, 0)).as_of, as_of)
-                self.assertEqual(update.previous_revision, (1000, 17))
+                self.assertNotIn("previous_revision", vars(update))
                 self.assertEqual(written.schema.metadata[b"version"], str(expected).encode())
                 self.assertEqual(written.schema.metadata[b"as_of"], as_of.isoformat().encode())
                 self.assertIs(cache.get_version(("prices", 1000)), old_data)
@@ -166,7 +166,7 @@ class DataCacheWriteTests(unittest.TestCase):
         for value in range(3):
             written, update = cache.write(table({"price": [value]}), id="prices", as_of=as_of)
             self.assertEqual(update.revision, (1 + value, 0))
-            self.assertEqual(update.previous_revision, (value, 0) if value else None)
+            self.assertNotIn("previous_revision", vars(update))
         # A new cache instance must be able to reconstruct the persisted chain.
         reader = MemoryDataCache()
         reader.latest_values = cache.latest_values.copy()
@@ -249,7 +249,7 @@ class DataCacheWriteTests(unittest.TestCase):
             returned, update = cache.write(id="prices", dependencies=deps, weak_dependencies=weak, as_of=as_of)
             self.assertIs(returned, data)
             self.assertEqual(update.revision, (2, count))
-            self.assertIsNone(update.previous_revision)
+            self.assertNotIn("previous_revision", vars(update))
             self.assertEqual(update.as_of, as_of)
             self.assertEqual((update.dependencies, update.weak_dependencies), (deps, weak))
             self.assertEqual([entry[:2] for entry in cache.writes], [
@@ -278,7 +278,7 @@ class DataCacheWriteTests(unittest.TestCase):
         data, initial = cache.write(table({"price": [10]}), id="prices")
         _, update = cache.write(data)
         self.assertEqual(update.revision, (initial.revision[0] + 1, 0))
-        self.assertEqual(update.previous_revision, initial.revision)
+        self.assertNotIn("previous_revision", vars(update))
 
     def test_dependency_publication_requires_existing_id(self):
         cache = MemoryDataCache()

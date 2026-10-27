@@ -18,14 +18,14 @@ def containment_history(states, counts=False, constrain_a=False):
     for version in (1, 2):
         if constrain_a:
             history.add("y", version)
-    history.add("a", 100, dependencies=(("x", 1),) + ((("y", 1),) if constrain_a else ()))
-    history.add("a", 9000, dependencies=(("x", 3),) + ((("y", 2),) if constrain_a else ()))
+    history.add("a", 1, dependencies=(("x", 1),) + ((("y", 1),) if constrain_a else ()))
+    history.add("a", 2, dependencies=(("x", 3),) + ((("y", 2),) if constrain_a else ()))
     dependencies = {
         "absent": (), "x1": (("x", 1),), "x2": (("x", 2),),
-        "x3": (("x", 3),), "a1": (("a", 100),), "a3": (("a", 9000),),
+        "x3": (("x", 3),), "a1": (("a", 1),), "a3": (("a", 2),),
     }
     for index, state in enumerate(states):
-        version, count = (50000, index) if counts else ((100, 200, 9000, 50000)[index], 0)
+        version, count = (1, index) if counts else ((1, 2, 3, 4)[index], 0)
         history.add("b", version, count, dependencies[state])
     return history
 
@@ -35,7 +35,7 @@ def pair(history, floor, reverse=False):
     manager = DataSubscriptionManager(cache)
     manager.add_subscriptions(("a", "b"))
     a, b = manager._subscriptions.values()
-    a.proposed_revision = ("a", 100, 0)  # An earlier comparison lowered A.
+    a.proposed_revision = ("a", 1, 0)  # An earlier comparison lowered A.
     b.proposed_revision = b.latest_revision
     bounds = (a.proposed_revision, floor)
     args = (b, a) if reverse else (a, b)
@@ -61,15 +61,15 @@ def monotonic_histories():
 class ContainmentTransitionTests(unittest.TestCase):
     def test_omitting_contained_root_still_checks_shared_descendants(self):
         history = containment_history(("x1", "x2", "a3"))
-        result = pair(history, ("b", 100, 0))
-        expected = {"a": ("a", 100, 0), "b": ("b", 100, 0)}
+        result = pair(history, ("b", 1, 0))
+        expected = {"a": ("a", 1, 0), "b": ("b", 1, 0)}
         self.assertTrue(history.consistent(expected))
         self.assertEqual(result, expected)  # B's newer omission still conflicts on X.
 
     def test_floor_excluding_only_compatible_omission_rejects_pair(self):
         history = containment_history(("x1", "x2", "a3"))
         floor = history.revisions("b")[1]
-        self.assertFalse(any(history.consistent({"a": ("a", 100, 0), "b": revision})
+        self.assertFalse(any(history.consistent({"a": ("a", 1, 0), "b": revision})
                              for revision in history.revisions("b") if revision >= floor))
         self.assertIsNone(pair(history, floor))
 
@@ -87,9 +87,9 @@ class ContainmentTransitionTests(unittest.TestCase):
                 if bool(exact) != require_exact:
                     continue
                 valid = [r for r in candidates
-                         if history.consistent({"a": ("a", 100, 0), "b": r})]
+                         if history.consistent({"a": ("a", 1, 0), "b": r})]
                 expected_revision = max(exact or valid, default=None)
-                expected = ({"a": ("a", 100, 0), "b": expected_revision}
+                expected = ({"a": ("a", 1, 0), "b": expected_revision}
                             if expected_revision is not None else None)
                 actual = pair(history, revisions[floor_index], reverse)
                 comparisons += 1
@@ -98,7 +98,7 @@ class ContainmentTransitionTests(unittest.TestCase):
         self.assertEqual(comparisons, 308 if require_exact else 1548)
         self.assertEqual(len(failures), 0, f"{len(failures)}/{comparisons} mismatches; first: {failures[:1]}")
 
-    def test_exact_containment_catalog_across_counts_sparse_versions_floors_and_orders(self):
+    def test_exact_containment_catalog_across_counts_contiguous_versions_floors_and_orders(self):
         self.check_catalog(require_exact=True)
 
     def test_omission_catalog_rechecks_all_shared_nodes_after_containment_disappears(self):
@@ -112,7 +112,7 @@ class ContainmentTransitionTests(unittest.TestCase):
                 continue
             history = containment_history(("x1", "x2", "a3"), constrain_a=True)
             # A's latest Y2 cannot match C's Y1, forcing the earlier proposal.
-            history.add("c", 100, dependencies=(("y", 1),))
+            history.add("c", 1, dependencies=(("y", 1),))
             manager = DataSubscriptionManager(HistoryCache(history))
             if entry.startswith("add_"):
                 manager.add_subscriptions(order[:-1])
@@ -122,11 +122,11 @@ class ContainmentTransitionTests(unittest.TestCase):
                 manager.add_subscriptions(order)
             if entry.endswith("update") or entry == "update_before_cut":
                 manager.apply_update(history.add("b", history.heads["b"][1], 1,
-                                                 dependencies=(("a", 9000),)))
+                                                 dependencies=(("a", 2),)))
             else:
                 manager.get_consistent_cut()
             cut = current_cut(manager)
-            witness = {key: (key, 100, 0) for key in order}
+            witness = {key: (key, 1, 0) for key in order}
             self.assertTrue(history.consistent(witness))
             if not history.consistent(cut):
                 failures.append((order, entry, cut))
@@ -138,15 +138,15 @@ class ContainmentTransitionTests(unittest.TestCase):
             history = History()
             for version in (1, 2, 3):
                 history.add("x", version)
-            history.add("a", 100, dependencies=(("x", 1),))
-            history.add("a", 100, 1, dependencies=(("x", 2),))
+            history.add("a", 1, dependencies=(("x", 1),))
+            history.add("a", 1, 1, dependencies=(("x", 2),))
             # A's explicit proposal pins count zero; consuming A's version
             # expands count one. Matching containment compares only A's version.
-            for index, deps in enumerate(((), (("a", 100),), (("a", 100),), (("x", 3),))):
-                version, count = (50000, index) if counts else ((100, 200, 9000, 50000)[index], 0)
+            for index, deps in enumerate(((), (("a", 1),), (("a", 1),), (("x", 3),))):
+                version, count = (1, index) if counts else ((1, 2, 3, 4)[index], 0)
                 history.add("b", version, count, deps)
             revisions = history.revisions("b")
-            expected = {"a": ("a", 100, 0), "b": revisions[2]}
+            expected = {"a": ("a", 1, 0), "b": revisions[2]}
             self.assertTrue(history.consistent(expected))
             actual = pair(history, revisions[1 if exclude_omission else 0], reverse)
             if actual != expected:
@@ -165,13 +165,13 @@ class ContainmentTransitionTests(unittest.TestCase):
                 history = History()
                 history.add("x", 1)
                 history.add("x", 3)
-                history.add("a", 100, dependencies=(("x", 1),))
-                history.add("a", 100, 1)  # A's latest count drops X.
-                for index, deps in enumerate(((("x", 1),), (("a", 100),), (("x", 3),))):
-                    version, count = (9000, index) if counts else ((100, 200, 9000)[index], 0)
+                history.add("a", 1, dependencies=(("x", 1),))
+                history.add("a", 1, 1)  # A's latest count drops X.
+                for index, deps in enumerate(((("x", 1),), (("a", 1),), (("x", 3),))):
+                    version, count = (1, index) if counts else ((1, 2, 3)[index], 0)
                     history.add("b", version, count, deps)
                 revisions = history.revisions("b")
-                expected = {"a": ("a", 100, 0), "b": revisions[1]}
+                expected = {"a": ("a", 1, 0), "b": revisions[1]}
                 self.assertTrue(history.consistent(expected))
                 self.assertNotIn("x", history.nodes(revisions[1]))
                 # B's contained A matches immediately. The older B -> X1 must
@@ -185,22 +185,22 @@ class ContainmentTransitionTests(unittest.TestCase):
                 for source in ("x", "y"):
                     for version in (1, 2):
                         history.add(source, version)
-                history.add("a", 100, dependencies=(("x", 1), ("y", 1)))
-                history.add("a", 100, 1, dependencies=(("y", 1),))
-                history.add("a", 9000, dependencies=(("x", 1), ("y", 2)))
-                history.add("b", 100, dependencies=(("x", 1), ("y", 1)))
-                history.add("b", 200, dependencies=(("a", 100),))
-                history.add("b", 9000, dependencies=(("x", 2), ("y", 1)))
+                history.add("a", 1, dependencies=(("x", 1), ("y", 1)))
+                history.add("a", 1, 1, dependencies=(("y", 1),))
+                history.add("a", 2, dependencies=(("x", 1), ("y", 2)))
+                history.add("b", 1, dependencies=(("x", 1), ("y", 1)))
+                history.add("b", 2, dependencies=(("a", 1),))
+                history.add("b", 3, dependencies=(("x", 2), ("y", 1)))
                 cache = HistoryCache(history)
                 manager = DataSubscriptionManager(cache)
                 manager.add_subscriptions(("a", "b"))
                 a, b = manager._subscriptions.values()
                 for sub in (a, b):
                     sub.proposed_revision = sub.latest_revision
-                # No B candidate can match A@9000: joint fallback must move A.
+                # No B candidate can match A@2: joint fallback must move A.
                 self.assertFalse(any(history.consistent({"a": a.latest_revision, "b": r})
                                      for r in history.revisions("b")))
-                expected = (("a", 100, 1), ("b", 200, 0))
+                expected = (("a", 1, 1), ("b", 2, 0))
                 self.assertTrue(history.consistent(dict(zip(("a", "b"), expected))))
                 args = (b, a) if reverse else (a, b)
                 self.assertEqual(find_consistent_cut(*args, cache), expected[::-1] if reverse else expected)
@@ -209,7 +209,7 @@ class ContainmentTransitionTests(unittest.TestCase):
 def changing_dag(old_mask, new_mask=None):
     history = History()
     edges = tuple(combinations(range(3), 2))
-    versions = ((100, old_mask),) if new_mask is None else ((100, old_mask), (9000, new_mask))
+    versions = ((1, old_mask),) if new_mask is None else ((1, old_mask), (2, new_mask))
     for version, mask in versions:
         for node in reversed(range(3)):
             history.add(f"n{node}", version, dependencies=tuple(
@@ -223,7 +223,7 @@ class ChangingTopologyTests(unittest.TestCase):
         # All 8 old DAGs x 8 new DAGs x 8 head vectors x 6 orders = 3,072.
         checked = 0
         for old, new, heads, order in product(range(8), range(8),
-                                             product((100, 9000), repeat=3), permutations(range(3))):
+                                             product((1, 2), repeat=3), permutations(range(3))):
             with self.subTest(old=old, new=new, heads=heads, order=order):
                 history = changing_dag(old, new)
                 manager = DataSubscriptionManager(HistoryCache(history))
@@ -255,13 +255,13 @@ class ChangingTopologyTests(unittest.TestCase):
                 for node in order:
                     key = f"n{node}"
                     before = current_cut(manager)
-                    record = complete.records[(key, 9000, 0)]
-                    update = history.add(key, 9000, dependencies=record.dependencies or ())
+                    record = complete.records[(key, 2, 0)]
+                    update = history.add(key, 2, dependencies=record.dependencies or ())
                     result = manager.apply_update(update)
                     after = current_cut(manager)
                     self.assertTrue(history.consistent(after), after)
                     self.assertTrue(all(after[k] >= before[k] for k in before))
                     self.assertEqual(result, {after[k][:2] for k in before if after[k][1] > before[k][1]})
-                self.assertTrue(all(r[1] == 9000 for r in current_cut(manager).values()))
+                self.assertTrue(all(r[1] == 2 for r in current_cut(manager).values()))
                 checked += 1
         self.assertEqual(checked, 1176)  # Three publications per stream.

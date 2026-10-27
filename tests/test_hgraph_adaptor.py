@@ -218,11 +218,35 @@ class HgraphAdaptorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "missing implementation"):
             self.run_graph(app)
 
+    def test_unpublished_subscription_ticks_when_first_publication_arrives(self):
+        observed = []
+
+        def first_update(transport):
+            transport.on_poll = None
+            _, update = seed(self.cache, "prices", value=7)
+            transport.send(update)
+
+        self.transport.on_poll = first_update
+
+        @hg.sink_node
+        def collect(df: hg.TS[hg.Frame[Prices]], version: hg.TS[VersionId]):
+            observed.append((as_arrow_table(df.value).to_pydict(), version.value))
+
+        @hg.graph
+        def app():
+            hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
+            collect(subscribe[Prices]("prices"), version_id("prices"))
+
+        self.run_graph(app)
+        self.assertEqual(observed, [({"price": [7]}, ("prices", 1))])
+        self.assertEqual((self.transport.starts, self.transport.stops), (1, 1))
+
     def test_start_and_poll_failures_close_transport(self):
+        seed(self.cache, "broken", dependencies=(("missing", 1),))
         @hg.graph
         def missing():
             hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
-            return subscribe[Prices]("missing")
+            return subscribe[Prices]("broken")
         with self.assertRaises(RuntimeError):
             self.run_graph(missing)
         self.assertEqual(self.transport.stops, 1)

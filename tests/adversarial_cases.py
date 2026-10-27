@@ -19,11 +19,10 @@ class History:
         self.heads = {}
 
     def add(self, data_id, version, count=0, dependencies=(), weak=()):
-        previous = self.heads.get(data_id)
         update = DataUpdateDetails(
             id=data_id, revision=(version, count), dependencies=tuple(dependencies) or None,
             weak_dependencies=tuple(weak) or None,
-            previous_revision=previous[1:] if previous and count == 0 else None, as_of=AS_OF,
+            as_of=AS_OF,
         )
         key = (data_id, version, count)
         self.records[key] = update
@@ -166,7 +165,7 @@ def dag_dependencies(edges, node, version):
 def dag_history(mask):
     history = History()
     edges = dag_edges(mask)
-    for version in (100, 9000):
+    for version in (1, 2):
         for node in reversed(range(4)):
             history.add(f"n{node}", version, dependencies=dag_dependencies(edges, node, version))
     return history

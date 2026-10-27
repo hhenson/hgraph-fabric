@@ -6,7 +6,7 @@ from collections.abc import Iterator
 
 from .data_cache import DataCache
 from .data_graph import DataEdgeGraph
-from .data_structures import DataRevisionId, DataVersionId
+from .data_structures import DataRevisionId, DataVersionId, is_no_data
 
 
 @dataclass(frozen=True)
@@ -86,6 +86,8 @@ class RevisionSearch:
         yield from range(min(high - 1, maximum - 1), low - 1, -1)
 
     def record(self, revision):
+        if is_no_data(revision):
+            return {}  # A selection boundary, never a metadata lookup.
         if revision in self.records:
             return self.records[revision]
         dependencies = self.cache.get_revision(revision).dependencies or ()
@@ -106,6 +108,10 @@ class RevisionSearch:
         fallback still covers changing membership, joint choices on both trees,
         and exact alignments after a path search finds an omission.
         """
+        if is_no_data(root):
+            if (constraints or {}).get(root[0], 0) == 0:
+                yield DependencyResolution(root, DataEdgeGraph(), {})
+            return
         first = self._path_solution(root, constraints or {}, ceilings or {})
         if first is not None:
             yield first

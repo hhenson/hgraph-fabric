@@ -14,16 +14,15 @@ AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 class DataDetailsTests(unittest.TestCase):
     def test_nullable_fields(self):
-        self.assertIsNone(DataRevisionDetails(None, None, None, as_of=AS_OF).dependencies)
-        self.assertIsNone(DataRevisionDetails(None, None, None, as_of=AS_OF).weak_dependencies)
-        self.assertIsNone(DataRevisionDetails(None, None, None, as_of=AS_OF).previous_revision)
+        self.assertIsNone(DataRevisionDetails(None, None, as_of=AS_OF).dependencies)
+        self.assertIsNone(DataRevisionDetails(None, None, as_of=AS_OF).weak_dependencies)
+        self.assertNotIn("previous_revision", vars(DataRevisionDetails(None, None, as_of=AS_OF)))
 
     def test_update_combines_revision_and_dependency_details(self):
         as_of = datetime(2026, 10, 21, tzinfo=UTC)
         details = DataUpdateDetails(
             id="prices",
             revision=(2, 3),
-            previous_revision=(1, 2),
             dependencies=(("source", 4),),
             weak_dependencies=(("reference", 5),),
             as_of=as_of,
@@ -33,18 +32,17 @@ class DataDetailsTests(unittest.TestCase):
         self.assertEqual(details.as_of, as_of)
         self.assertEqual(details.id, "prices")
         self.assertEqual(details.revision, (2, 3))
-        self.assertEqual(details.previous_revision, (1, 2))
+        self.assertNotIn("previous_revision", vars(details))
         self.assertEqual(details.dependencies, (("source", 4),))
         self.assertEqual(details.weak_dependencies, (("reference", 5),))
 
     def test_details_are_frozen(self):
         instances = (
-            DataRevisionDetails(None, None, None, as_of=AS_OF),
+            DataRevisionDetails(None, None, as_of=AS_OF),
             LatestDataDetails((1, 1)),
             DataUpdateDetails(
                 id="prices",
                 revision=(1, 1),
-                previous_revision=None,
                 dependencies=None,
                 weak_dependencies=None, as_of=AS_OF,
             ),

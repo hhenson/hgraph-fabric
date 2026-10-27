@@ -254,7 +254,7 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
                 self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 1)], ('m', 1, 1))
                 reads = [key for kind, key in reader.cache.loads if kind == 'revision']
                 self.assertLess(reads.index(('m', 2, 0)), reads.index(('m', 1, 0)))
-                self.assertIn(('a', 2, 0), reads)  # Its stored link reaches A@200.
+                self.assertIn(('a', 2, 0), reads)  # This is the preceding version's top record.
 
     def test_shared_conflict_requires_repairing_both_parent_paths(self):
         world = World()

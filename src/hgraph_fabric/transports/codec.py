@@ -36,11 +36,9 @@ def decode_update(payload: bytes) -> DataUpdateDetails:
             raise ValueError("Dependencies must be an array or null")
         return tuple(pair(item, str) for item in value)
 
-    previous = fields["previous_revision"]
     return DataUpdateDetails(
         id=fields["id"],
         revision=pair(fields["revision"], int),
-        previous_revision=None if previous is None else pair(previous, int),
         dependencies=dependencies(fields["dependencies"]),
         weak_dependencies=dependencies(fields["weak_dependencies"]),
         as_of=datetime.fromisoformat(fields["as_of"]),

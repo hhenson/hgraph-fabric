@@ -208,7 +208,7 @@ class ThreadedSessionTests(unittest.TestCase):
             self.assertTrue(completed.wait(2))
 
         self.assertEqual([update.revision for update in updates], [(1, 0), (2, 0), (3, 0)])
-        self.assertEqual([update.previous_revision for update in updates], [None, (1, 0), (2, 0)])
+        self.assertEqual([update.revision for update in updates], [(1, 0), (2, 0), (3, 0)])
         self.assertEqual(self.cache.latest("output"), ("output", 3, 0))
         self.assertEqual(self.cache.latest_values["output"], ("output", 3, 0))
         for version, value, dependency in ((1, 11, 10), (2, 12, 10), (3, 21, 20)):
@@ -270,9 +270,22 @@ class ThreadedSessionTests(unittest.TestCase):
         self.assertIs(raised.exception, error)
 
     def test_subscription_initialization_failure_stops_worker(self):
+        self.cache.write(table({"value": [1]}), id="broken", dependencies=(("missing", 1),))
         with self.assertRaises(KeyError):
-            with run_data_fabric_session(self.cache, self.transport, lambda _, publish: None, subscriptions=["missing"]):
-                self.fail("Missing subscription must fail initialization")
+            with run_data_fabric_session(self.cache, self.transport, lambda _, publish: None, subscriptions=["broken"]):
+                self.fail("Missing dependency metadata must fail initialization")
+        self.assertTrue(self.transport.stopped.is_set())
+        self.assertFalse(self.transport.calls[0][1].is_alive())
+
+    def test_unpublished_subscription_delivers_first_value_on_worker(self):
+        changes = Queue()
+        with run_data_fabric_session(
+            self.cache, self.transport, lambda delta, publish: changes.put(delta),
+            subscriptions=["a"], poll_interval=0.01,
+        ) as publish:
+            data, _ = publish(table({"value": [1]}), id="a")
+            self.assertIs(changes.get(timeout=2)["a"], data)
+            self.assertTrue(changes.empty())
         self.assertTrue(self.transport.stopped.is_set())
         self.assertFalse(self.transport.calls[0][1].is_alive())
 

@@ -25,10 +25,10 @@ def start_stream(case, seed, branching):
     for index in reversed(range(6)):
         targets = names[index + 1:]
         if branching:
-            dependencies = tuple((key, 100) for key in targets if rng.randrange(2))
+            dependencies = tuple((key, 1) for key in targets if rng.randrange(2))
         else:
-            dependencies = ((targets[0], 100),) if targets else ()
-        history.add(names[index], 100, dependencies=dependencies)
+            dependencies = ((targets[0], 1),) if targets else ()
+        history.add(names[index], 1, dependencies=dependencies)
     roots = rng.sample(names, rng.randrange(2, 7))
     return rng, names, Stream(case, history, roots, shared=seed % 2 == 0)
 
@@ -40,7 +40,7 @@ def next_update(history, rng, names, branching):
         old = history.heads[key]
         _, version, count = old
         if rng.randrange(2):
-            version, count = version + rng.choice((7, 113, 1009)), 0
+            version, count = version + rng.choice((1, 1, 1)), 0
         else:
             count += 1
         targets = names[index + 1:]
@@ -68,7 +68,7 @@ def converge(case, stream, names):
     for index in reversed(range(len(names))):
         key = names[index]
         dependencies = (stream.history.heads[names[index + 1]][:2],) if index < len(names) - 1 else ()
-        version = stream.history.heads[key][1] + 100003
+        version = stream.history.heads[key][1] + 1
         stream.publish(stream.history.add(key, version, dependencies=dependencies))
     for manager in stream.managers:
         case.assertEqual(current_cut(manager), {key: stream.history.heads[key] for key in manager._subscriptions})
@@ -154,17 +154,17 @@ class MixedRoleReviewTests(unittest.TestCase):
                 history = History()
                 history.add("x", 1)
                 history.add("x", 2)
-                history.add("m", 100, dependencies=(("x", 1),))
+                history.add("m", 1, dependencies=(("x", 1),))
                 for key in ("a", "b"):
-                    history.add(key, 100)
-                    history.add(key, 9000, dependencies=(("m", 100),))
-                history.add("peer", 100, dependencies=(("x", 2),))
+                    history.add(key, 1)
+                    history.add(key, 2, dependencies=(("m", 1),))
+                history.add("peer", 1, dependencies=(("x", 2),))
                 cache = HistoryCache(history)
                 manager = DataSubscriptionManager(cache)
                 manager.add_subscriptions(order)
                 manager.get_consistent_cut()
                 old = current_cut(manager)
-                self.assertEqual(set(manager._conflicts), {("m", 100)})
+                self.assertEqual(set(manager._conflicts), {("m", 1)})
                 if bulk:
                     manager.add_subscriptions(("m", "m"))  # Idempotent bulk registration.
                 else:
@@ -175,13 +175,13 @@ class MixedRoleReviewTests(unittest.TestCase):
                 count = 0
                 if blocked_first:
                     count += 1
-                    result = manager.apply_update(history.add("m", 100, count, dependencies=(("x", 1),)))
+                    result = manager.apply_update(history.add("m", 1, count, dependencies=(("x", 1),)))
                     self.assertEqual(result, set())
                     self.assertEqual({key: manager._subscriptions[key].current_revision for key in old}, old)
-                    self.assertIsNone(sub.current_revision)
+                    self.assertEqual(sub.current_revision, ("m", 0, 0))
                 count += 1
-                result = manager.apply_update(history.add("m", 100, count, dependencies=(("x", 2),)))
-                self.assertEqual(result, {("a", 9000), ("b", 9000), ("m", 100)})
+                result = manager.apply_update(history.add("m", 1, count, dependencies=(("x", 2),)))
+                self.assertEqual(result, {("a", 2), ("b", 2), ("m", 1)})
                 self.assertEqual(current_cut(manager), {key: history.heads[key] for key in (*order, "m")})
                 self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
                 self.assertTrue(all(manager._subscriptions[key].current_revision >= old[key] for key in old))

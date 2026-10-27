@@ -4,7 +4,7 @@ from enum import Enum, auto
 from .data_cache import DataCache
 from .dependency_resolution import RevisionSearch
 from .data_graph import DataEdgeGraph
-from .data_structures import DataId, DataRevisionId, DataVersion, DataVersionId
+from .data_structures import DataId, DataRevisionId, DataVersion, DataVersionId, is_no_data, no_data_revision
 from .data_subscription_graph import DataSubscriptionGraph
 
 
@@ -82,7 +82,7 @@ def find_consistent_cut(
         other_nodes = _nodes(right_graph, right_revision) if contained_is_left else _nodes(left_graph, left_revision)
         target = other_nodes.get(contained[0])
         floor = lower_bounds[0 if contained_is_left else 1]
-        if target is not None and contained[1] > target and (floor is None or target >= floor[1]):
+        if target is not None and target > 0 and contained[1] > target and (floor is None or target >= floor[1]):
             adjusted = cache.get_latest_revision((contained[0], target))
             pair = (adjusted, right_revision) if contained_is_left else (left_revision, adjusted)
             resolved, aligned = _resolve_dependencies(left, right, *pair, common, search)
@@ -108,7 +108,7 @@ def find_consistent_cut(
         return (revision, right_revision) if leading_is_left else (left_revision, revision)
 
     # 3. Walk actual revisions newest first, respecting proposed/current bounds.
-    # Revision zero links to the preceding version. Resolve that version's own head;
+    # Address the preceding version directly and resolve its own head;
     # it can receive new revisions after its successor has been published.
     #
     # Each root candidate searches intermediate revisions within fixed data
@@ -128,7 +128,7 @@ def find_consistent_cut(
 
     # 4. An omission has lower precedence than every admissible exact match.
     # Use it only after the entire bounded history has been searched.
-    if absent is not None:
+    if absent is not None and not any(is_no_data(candidate.root) for candidate in absent):
         _stage(leading, fixed, absent)
         return result(absent[0].root)
     # Independent inputs may have been consumed in different orders, leaving no
@@ -151,7 +151,7 @@ def _search_both_histories(
     cache: DataCache,
     leading_floor: DataRevisionId | None = None,
     fixed_floor: DataRevisionId | None = None,
-    *, conflict_paths=None,
+    *, conflict_paths=None, include_no_data=False,
 ) -> tuple[DataRevisionId, DataRevisionId]:
     """Rare exhaustive fallback; prefer retaining the formerly fixed side.
 
@@ -162,9 +162,14 @@ def _search_both_histories(
     """
     absent = None
     search = RevisionSearch(cache, conflict_paths=conflict_paths)
-    for fixed_revision in _revisions_backwards(fixed_start, cache, fixed_floor, search):
+    for fixed_revision in _revisions_backwards(
+        fixed_start, cache, fixed_floor, search, include_no_data=include_no_data,
+    ):
         fixed_inputs = search.record(fixed_revision) | {fixed_revision[0]: fixed_revision[1]}
-        for leading_revision in _revisions_backwards(leading_start, cache, leading_floor, search, fixed_inputs):
+        for leading_revision in _revisions_backwards(
+            leading_start, cache, leading_floor, search, fixed_inputs,
+            include_no_data=include_no_data,
+        ):
             resolved, comparison = _resolve_dependencies(
                 leading, fixed, leading_revision, fixed_revision, common, search)
             if comparison is _Comparison.EXACT:
@@ -175,6 +180,15 @@ def _search_both_histories(
     if absent is not None:
         _stage(leading, fixed, absent)
         return absent[0].root, absent[1].root
+    if not include_no_data and any(floor is None or is_no_data(floor)
+                                  for floor in (leading_floor, fixed_floor)):
+        # No-data is below every published choice, including a compatible
+        # dependency omission. Exhaust published pairs before using it.
+        return _search_both_histories(
+            leading, fixed, leading_start, fixed_start, common, cache,
+            leading_floor, fixed_floor, conflict_paths=conflict_paths,
+            include_no_data=True,
+        )
     raise NoConsistentCutError("No compatible pair exists within the proposed histories")
 
 
@@ -271,10 +285,10 @@ def _compare_candidates(
 
 def _revisions_backwards(
     revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None,
-    search: RevisionSearch, constraints=None,
+    search: RevisionSearch, constraints=None, *, include_no_data=False,
 ) -> Iterator[DataRevisionId]:
-    # Counts are consecutive within a version. Revision-zero links retain the
-    # preceding version when crossing a boundary; its own head supplies the count.
+    # Version and revision numbers are consecutive. Older versions have their
+    # own mutable revision heads; no predecessor links are needed.
     for version, maximum_count in _version_bounds(revision, cache, floor):
         minimum_count = floor[2] if floor is not None and version == floor[1] else 0
         # Reaching the subscribed parent uses the same zero-count probe and
@@ -283,6 +297,8 @@ def _revisions_backwards(
         # through different intermediate revisions during a later comparison.
         for count in search.counts((revision[0], version), maximum_count, constraints, minimum_count):
             yield revision[0], version, count
+    if (include_no_data or is_no_data(revision)) and (floor is None or is_no_data(floor)):
+        yield no_data_revision(revision[0])
 
 
 def _nodes(graph: DataEdgeGraph, revision: DataRevisionId) -> dict[DataId, DataVersion]:
@@ -305,15 +321,18 @@ def _version_bounds(
     revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None = None
 ) -> Iterator[tuple[DataVersion, int]]:
     data_id, version, maximum_count = revision
+    if is_no_data(revision):
+        return
     while True:
         if floor is not None and version < floor[1]:
             return
         yield version, maximum_count
         if floor is not None and version == floor[1]:
             return  # No need to load history preceding the committed version.
-        previous = cache.get_revision((data_id, version, 0)).previous_revision
-        if previous is None:
+        if version == 1:
             return
-        if previous[0] >= version:
-            raise ValueError("Revision-zero history must point to an older version")
-        _, version, maximum_count = cache.get_latest_revision((data_id, previous[0]))
+        version -= 1
+        # Probe the lower count before looking up the older version's upper
+        # count. counts() uses the immediate records to bound the search.
+        cache.get_revision((data_id, version, 0))
+        _, _, maximum_count = cache.get_latest_revision((data_id, version))

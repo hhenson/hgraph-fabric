@@ -57,11 +57,9 @@ class ObjectStoreDataCache(DataCache):
         raw = self._read(self._path(data_id, f"revisions/{version}/{count}.json"), revision_id)
         try:
             value = json.loads(bytes(raw))
-            previous = value["previous_revision"]
             details = DataRevisionDetails(
                 dependencies=_dependencies(value["dependencies"]),
                 weak_dependencies=_dependencies(value["weak_dependencies"]),
-                previous_revision=None if previous is None else _pair(previous, int),
                 as_of=datetime.fromisoformat(value["as_of"]),
             )
             if count == 0 and re.fullmatch(r"[0-9a-f]{32}", value["payload"]) is None:

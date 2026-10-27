@@ -15,10 +15,10 @@ class DataCacheHistoryTests(unittest.TestCase):
         self.cache = MemoryDataCache()
         self.cache.latest_values["prices"] = ("prices", 3, 7)
         self.cache.revision_values.update({
-            ("prices", 3, 0): DataRevisionDetails((), (), (2, 23), as_of=AS_OF),
-            ("prices", 2, 23): DataRevisionDetails((), (), None, as_of=AS_OF),
-            ("prices", 2, 0): DataRevisionDetails((), (), (1, 0), as_of=AS_OF),
-            ("prices", 1, 0): DataRevisionDetails((), (), None, as_of=AS_OF),
+            ("prices", 3, 0): DataRevisionDetails((), (), as_of=AS_OF),
+            ("prices", 2, 23): DataRevisionDetails((), (), as_of=AS_OF),
+            ("prices", 2, 0): DataRevisionDetails((), (), as_of=AS_OF),
+            ("prices", 1, 0): DataRevisionDetails((), (), as_of=AS_OF),
         })
         self.expected = [("prices", 3, 7), ("prices", 2, 23), ("prices", 1, 0)]
 
@@ -27,7 +27,7 @@ class DataCacheHistoryTests(unittest.TestCase):
         self.cache.latest("prices")
         self.cache.data_values[("payload-only", 2)] = table({"x": []})
         self.cache.get_version(("payload-only", 2))
-        self.cache.revision_values[("revision-only", 3, 2)] = DataRevisionDetails((), (), None, as_of=AS_OF)
+        self.cache.revision_values[("revision-only", 3, 2)] = DataRevisionDetails((), (), as_of=AS_OF)
         self.cache.get_revision(("revision-only", 3, 2))
         self.cache.loads.clear()
         expected = {"prices", "payload-only", "revision-only"}
@@ -47,29 +47,29 @@ class DataCacheHistoryTests(unittest.TestCase):
         self.assertEqual(self.cache.loads[-1], ("latest_revision", ("prices", 2)))
         self.assertEqual(list(history), self.expected[2:])
         self.assertEqual(self.cache.loads, [
-            ("latest", "prices"), ("revision", ("prices", 3, 0)),
-            ("latest_revision", ("prices", 2)), ("revision", ("prices", 2, 0)),
-            ("latest_revision", ("prices", 1)), ("revision", ("prices", 1, 0)),
+            ("latest", "prices"),
+            ("latest_revision", ("prices", 2)),
+            ("latest_revision", ("prices", 1)),
         ])
         self.cache.loads.clear()
         self.assertEqual(list(self.cache.version_history("prices")), self.expected)
         self.assertEqual(self.cache.loads, [])
 
-    def test_peek_history_stops_at_first_uncached_link(self):
+    def test_peek_history_stops_at_first_uncached_head(self):
         self.assertEqual(list(self.cache.peek_version_history("prices")), [])
         self.assertEqual(self.cache.loads, [])
         self.cache.latest("prices")
         self.cache.loads.clear()
         self.assertEqual(list(self.cache.peek_version_history("prices")), self.expected[:1])
         self.assertEqual(self.cache.loads, [])
-        # A disconnected older header must not let a peek skip the missing link.
+        # An older revision record alone does not establish its version head.
         self.cache.get_revision(("prices", 2, 0))
         self.cache.loads.clear()
         self.assertEqual(list(self.cache.peek_version_history("prices")), self.expected[:1])
         self.assertEqual(self.cache.loads, [])
         self.cache.get_revision(("prices", 3, 0))
         self.cache.loads.clear()
-        # The predecessor snapshot alone cannot establish its current head.
+        # Loading revision zero also leaves the older head unresolved.
         self.assertEqual(list(self.cache.peek_version_history("prices")), self.expected[:1])
         self.assertEqual(self.cache.loads, [])
         self.cache.get_latest_revision(("prices", 2))
@@ -89,31 +89,25 @@ class DataCacheHistoryTests(unittest.TestCase):
         self.assertEqual(list(self.cache.peek_version_history("prices")), self.expected)
         self.assertEqual(self.cache.loads, [])
 
-    def test_loading_history_propagates_missing_head_or_header(self):
+    def test_loading_history_propagates_missing_head(self):
         with self.assertRaises(KeyError):
             next(self.cache.version_history("unknown"))
         del self.cache.revision_values[("prices", 2, 0)]
+        del self.cache.revision_values[("prices", 2, 23)]
         history = self.cache.version_history("prices")
         self.assertEqual(next(history), self.expected[0])
-        self.assertEqual(next(history), self.expected[1])
         with self.assertRaises(KeyError) as error:
             next(history)
-        self.assertEqual(error.exception.args, (("prices", 2, 0),))
+        self.assertEqual(error.exception.args, (("prices", 2),))
 
-    def test_history_rejects_non_decreasing_links_in_both_modes(self):
-        for previous in ((3, 6), (4, 1)):
-            for peek in (False, True):
-                with self.subTest(previous=previous, peek=peek):
-                    cache = MemoryDataCache()
-                    cache.latest_values["prices"] = ("prices", 3, 7)
-                    cache.revision_values[("prices", 3, 0)] = DataRevisionDetails((), (), previous, as_of=AS_OF)
-                    if peek:
-                        cache.latest("prices")
-                        cache.get_revision(("prices", 3, 0))
-                    iterator = (cache.peek_version_history if peek else cache.version_history)("prices")
-                    self.assertEqual(next(iterator), self.expected[0])
-                    with self.assertRaises(ValueError):
-                        next(iterator)
+    def test_history_needs_only_heads_not_revision_zero_records(self):
+        del self.cache.revision_values[("prices", 3, 0)]
+        del self.cache.revision_values[("prices", 2, 0)]
+        self.assertEqual(list(self.cache.version_history("prices")), self.expected)
+        self.assertFalse(any(kind == "revision" for kind, _ in self.cache.loads))
+        self.cache.loads.clear()
+        self.assertEqual(list(self.cache.peek_version_history("prices")), self.expected)
+        self.assertEqual(self.cache.loads, [])
 
     def test_history_rejects_foreign_head_in_both_modes(self):
         self.cache.latest_values["prices"] = ("other", 3, 7)
