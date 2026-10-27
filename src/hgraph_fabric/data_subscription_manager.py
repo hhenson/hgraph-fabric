@@ -19,6 +19,9 @@ class DataSubscriptionManager:
         self._conflicts: dict[DataVersionId, set[DataId]] = {}
         self._dirty_subscriptions: set[DataId] = set()
         self._pending_cuts: dict[DataId, set[DataVersionId]] = {}
+        # Root candidate -> conflict-path versions and their last observed heads.
+        # These paths may occur in neither the current nor the latest expansion.
+        self._historical_conflicts: dict[DataRevisionId, dict[DataVersionId, DataRevisionId]] = {}
 
     def add_subscription(self, data_id: DataId) -> DataSubscriptionGraph:
         if data_id not in self._subscriptions:
@@ -48,13 +51,26 @@ class DataSubscriptionManager:
         return advanced
 
     def _apply_update(self, update: DataUpdateDetails) -> set[DataVersionId]:
-        self._cache.apply_update(update)
         revision = (update.id, *update.revision)
-        # Only trees using this exact data version can have changed. Current
-        # and latest are indexed: a waiting latest tree still needs refreshes.
+        # Eligibility belongs to the pre-notification paths. Do not recount
+        # after refreshing indexes or retiring watches: this update may remove
+        # the very dependency that was preventing those roots from advancing.
+        dependents_before = set(self._dependents.get(revision[:2], ()))
+        # Current/latest trees and retained historical conflict paths use exact
+        # data versions. A historical path can change without either tree doing so.
         affected = set()
-        dependents = set(self._dependents.get(revision[:2], ()))
-        for data_id in dependents:
+        historical_updates = []
+        for root, versions in self._historical_conflicts.items():
+            observed = versions.get(revision[:2])
+            if observed is not None:
+                dependents_before.add(root[0])
+                if revision > observed:
+                    affected.add(root[0])
+                    historical_updates.append(versions)
+        self._cache.apply_update(update)
+        for versions in historical_updates:
+            versions[revision[:2]] = revision
+        for data_id in dependents_before:
             sub = self._subscriptions[data_id]
             invalidated = sub.invalidate_dependency(revision)
             if invalidated & {sub.current_revision, sub.latest_revision}:
@@ -85,9 +101,9 @@ class DataSubscriptionManager:
                     return advanced
         if subscription is None:
             # Refreshing trees does not itself request a tournament. Wake only
-            # recorded conflicts shared by at least two dependent subscriptions,
-            # with an affected subscription still waiting behind latest.
-            if not affected or len(dependents) < 2 or revision[:2] not in self._conflicts:
+            # recorded conflicts shared by at least two dependent subscriptions
+            # (including historical owners), with an affected root behind latest.
+            if not affected or len(dependents_before) < 2 or revision[:2] not in self._conflicts:
                 return set()
             # A later comparison can downgrade another dependent onto this
             # path. The original pair identifies the conflict, not every root
@@ -216,7 +232,7 @@ class DataSubscriptionManager:
         return {sub.current_revision[:2] for sub in subscriptions}
 
     def cleanup_conflicts(self) -> None:
-        """Retire resolved roots and versions absent from current/latest trees.
+        """Retire resolved roots and paths outside admissible candidate histories.
 
         Run after a completed update or initial cut, including blocked updates.
         Keep live version markers while any recorded root is still waiting; that
@@ -229,8 +245,51 @@ class DataSubscriptionManager:
         }
         for version in list(self._conflicts):
             self._conflicts[version].intersection_update(waiting)
-            if not self._conflicts[version] or version not in self._dependents:
+        historical_versions = set()
+        for root, versions in list(self._historical_conflicts.items()):
+            sub = self._subscriptions[root[0]]
+            if ((sub.current_revision is not None and root < sub.current_revision)
+                    or root > sub.latest_revision):
+                del self._historical_conflicts[root]
+                continue
+            retained = {version: revision for version, revision in versions.items()
+                        if self._conflicts.get(version) and self._revision_may_advance(version, revision)}
+            if retained:
+                self._historical_conflicts[root] = retained
+                historical_versions.update(retained)
+            else:
+                del self._historical_conflicts[root]
+        for version in list(self._conflicts):
+            if not self._conflicts[version] or (version not in self._dependents and version not in historical_versions):
                 del self._conflicts[version]
+
+    def _remember_conflict_paths(self, paths, pair):
+        for root, versions in paths.items():
+            for version in versions:
+                if version[0] in self._subscriptions:
+                    continue  # Root notifications already reach the manager.
+                observed = self._cache.get_latest_revision(version)
+                if not self._revision_may_advance(version, observed):
+                    continue
+                self._historical_conflicts.setdefault(root, {})[version] = observed
+                self._conflicts.setdefault(version, set()).update(sub.data_id for sub in pair)
+
+    def _revision_may_advance(self, version, observed):
+        # A successor's immutable revision-zero link seals the old version's
+        # maximum count. Keep a watch if that final count is not yet observed:
+        # its notification may arrive after the successor's notification.
+        head = self._cache.peek_latest(version[0])
+        while head is not None and head[1] > version[1]:
+            record = self._cache.peek_revision((head[0], head[1], 0))
+            if record is None or record.previous_revision is None:
+                break  # No cached proof that this version is complete.
+            previous = record.previous_revision
+            if previous[0] == version[1]:
+                return previous[1] > observed[2]
+            if previous[0] >= head[1]:
+                break  # History validation remains the loader's responsibility.
+            head = (head[0], *previous)
+        return True
 
     def _prepare_proposals(
         self, subscriptions: tuple[DataSubscriptionGraph, ...], *, updating: bool = False,
@@ -286,17 +345,21 @@ class DataSubscriptionManager:
         left, right = (subscriptions[i] for i in pair)
         before_resolutions = left.proposal(self._cache), right.proposal(self._cache)
         before_states = tuple(r.signature for r in before_resolutions)
+        conflict_paths = {}
         try:
             if updated is None:
-                revisions = find_consistent_cut(left, right, self._cache)
+                revisions = find_consistent_cut(left, right, self._cache, conflict_paths=conflict_paths)
             else:
                 revisions = find_consistent_cut(
                     left, right, self._cache,
                     lower_bounds=(left.current_revision, right.current_revision),
+                    conflict_paths=conflict_paths,
                 )
         except NoConsistentCutError:
             self._track_conflicts(left, right)
             raise
+        finally:
+            self._remember_conflict_paths(conflict_paths, (left, right))
         after = []
         for index, revision in zip(pair, revisions):
             sub = subscriptions[index]

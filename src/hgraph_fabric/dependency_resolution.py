@@ -31,11 +31,31 @@ class RevisionSearch:
     ordering have been checked. Descendant expansions are never used as an
     ordering key: their revision choices are resolved recursively instead.
     """
-    def __init__(self, cache: DataCache):
+    def __init__(self, cache: DataCache, *, conflict_paths=None):
         self.cache = cache
+        self.conflict_paths = conflict_paths
         self.indexes = {}
         self.records = {}
         self.dependencies: set[DataVersionId] = set()
+
+    def watch_conflict_paths(self, root, conflicts, edges):
+        """Retain consumers on rejected paths, including historical choices."""
+        if self.conflict_paths is None or not conflicts:
+            return
+        parents = {}
+        for consumer, dependency in edges:
+            parents.setdefault(dependency, set()).add(consumer)
+        pending = [version for version in parents if version[0] in conflicts]
+        visited, consumers = set(pending), set()
+        while pending:
+            for parent in parents.get(pending.pop(), ()):
+                if parent != root[:2]:
+                    consumers.add(parent)
+                if parent not in visited:
+                    visited.add(parent)
+                    pending.append(parent)
+        if consumers:
+            self.conflict_paths.setdefault(root, set()).update(consumers)
 
     def counts(self, version, maximum, constraints, minimum=0):
         # The latest record is the usual case; do not load its history unless
@@ -135,6 +155,7 @@ class RevisionSearch:
                              or (name in constraints and versions[name] != {constraints[name]})), None)
             if conflict is None:
                 return DependencyResolution(root, DataEdgeGraph(edges), revisions)
+            self.watch_conflict_paths(root, {conflict}, edges)
             target = constraints.get(conflict, min(versions[conflict]))
             wrong = [(conflict, value) for value in sorted(versions[conflict], reverse=True)
                      if value != target]
@@ -184,12 +205,16 @@ class RevisionSearch:
                 chosen = nodes.copy()
                 additions = []
                 valid = True
+                conflicts = set()
                 for name, value in ((version[0], version[1]), *inputs.items()):
                     if chosen.setdefault(name, value) != value or constraints.get(name, value) != value:
                         valid = False
+                        conflicts.add(name)
                     if name in inputs:
                         additions.append(((name, value), None))
                 if not valid:
+                    self.watch_conflict_paths(
+                        root, conflicts, edges + [(version, item) for item in inputs.items()])
                     continue
                 yield (pending + additions, chosen, revisions | {version: revision},
                        edges + [(version, (name, value)) for name, value in inputs.items()])

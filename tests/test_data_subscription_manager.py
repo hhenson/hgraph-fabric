@@ -18,6 +18,8 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         self.cache = Mock(spec=DataCache)
         self.cache.latest.side_effect = self.latest.__getitem__
         self.cache.get_revision.side_effect = self.revisions.__getitem__
+        self.cache.peek_latest.side_effect = self.latest.get
+        self.cache.peek_revision.side_effect = self.revisions.get
         self.cache.get_latest_revision.side_effect = (
             lambda version: max(r for r in self.revisions if r[:2] == version)
         )
@@ -166,13 +168,13 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         self.manager.add_subscriptions(["a", "b", "c", "d"])
         # a/b initially agree on x=2. Matching a/c rolls a back to x=1,y=1,
         # invalidating a/b; b/c have no overlap and cannot repair that pair.
-        def compare(left, right, cache):
+        def compare(left, right, cache, **kwargs):
             if right.data_id == "d":
                 for data_id in ("a", "b", "c"):
                     self.assertEqual(
                         self.manager._subscriptions[data_id].proposed_revision, (data_id, 100, 0)
                     )
-            return find_consistent_cut(left, right, cache)
+            return find_consistent_cut(left, right, cache, **kwargs)
 
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
             self.assertEqual(
@@ -219,11 +221,11 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         for subscription in self.manager._subscriptions.values():
             subscription.current_revision = (subscription.data_id, 1, 0)
 
-        def compare(left, right, cache):
+        def compare(left, right, cache, **kwargs):
             for subscription in self.manager._subscriptions.values():
                 self.assertEqual(subscription.proposed_revision, subscription.latest_revision)
                 self.assertEqual(subscription.current_revision, (subscription.data_id, 1, 0))
-            return find_consistent_cut(left, right, cache)
+            return find_consistent_cut(left, right, cache, **kwargs)
 
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
             self.assertEqual(self.manager.get_consistent_cut(), {("a", 100), ("b", 100), ("c", 100)})
@@ -247,12 +249,12 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         a.current_revision = ("a", 100, 1)
         previous = {key: sub.current_revision for key, sub in self.manager._subscriptions.items()}
 
-        def compare(left, right, cache):
+        def compare(left, right, cache, **kwargs):
             if right.data_id == "c":
                 self.assertEqual(a.proposed_revision, ("a", 100, 0))
                 self.assertEqual(a.current_revision, ("a", 100, 1))
                 raise OSError("Unavailable history")
-            return find_consistent_cut(left, right, cache)
+            return find_consistent_cut(left, right, cache, **kwargs)
 
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
             with self.assertRaises(OSError):
