@@ -591,7 +591,6 @@ and bound delayed inputs. Crossing a compiled graph boundary or an unresolved
 input raises a wiring error asking for explicit dependencies. Runtime calls to
 `make_active()` or `make_passive()` in user code cannot be inferred at wiring time.
 
-The `hgraph` extra currently pins the upstream wiring-inspection commit from
-[hgraph PR #1783](https://github.com/hhenson/hgraph/pull/1783). Installation builds
-hgraph from source until this API is included in a released wheel; the pin can
-then be replaced with that release requirement.
+The `hgraph` extra requires hgraph 0.8.36 or later in the 0.8 series, which
+includes the wiring-inspection API. CI installs its published wheels and fails
+if no compatible wheel is available, rather than compiling hgraph from source.
