@@ -40,7 +40,7 @@ def find_consistent_cut(
     subscription, and the other stays fixed. Prefer matching all original
     common nodes to omitting any; also check newly shared nodes. Search newest
     first, returning the first exact match. Retain the newest consistent omission
-    only as a fallback after every admissible exact candidate is ruled out.
+    only after ruling out exact candidates with the other root fixed.
     Intermediate revision choices are searched within their referenced data
     version before changing a root revision. If holding one side fixed
     cannot find an alignment, search both bounded histories as an exceptional fallback. Raise
@@ -126,8 +126,9 @@ def find_consistent_cut(
         if resolved is not None and absent is None:
             absent = resolved
 
-    # 4. An omission has lower precedence than every admissible exact match.
-    # Use it only after the entire bounded history has been searched.
+    # 4. With the other root fixed, prefer every admissible exact match
+    # to an omission. A published omission ends this search; moving both
+    # roots is a fallback only when this stage finds no published pair.
     if absent is not None and not any(is_no_data(candidate.root) for candidate in absent):
         _stage(leading, fixed, absent)
         return result(absent[0].root)

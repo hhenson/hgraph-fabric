@@ -244,8 +244,8 @@ class DataCache(ABC):
         )
         version_id = revision_id[:2]
         if version_id not in self._latest_revisions and (latest is None or latest[:2] != version_id):
-            # A notification is a lower bound until history is loaded: it may
-            # lag the stored count or advance beyond the count in the link.
+            # A notification is a lower bound until the stored version head is
+            # loaded; newer revision records may already exist in storage.
             self._pending_revision_heads[version_id] = max(
                 self._pending_revision_heads.get(version_id, revision_id), revision_id,
             )
