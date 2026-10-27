@@ -77,16 +77,22 @@ subscribed root. These watches are keyed by the root candidate and exact
 dependency version; they supplement the current/latest dependency index.
 See the [publication-and-delivery counterexample](tests/HISTORICAL_CONFLICT_REVIEW.md).
 
-An unsubscribed dependency update attempts advancement only if that exact version
-has a recorded conflict, at least two subscriptions depend on it through indexed
-trees or retained historical conflict paths, and an affected
-subscription is behind latest. Unrelated branches, other data versions and
+For conflicts between subscriptions, an unsubscribed dependency update attempts
+advancement only if that exact version has a recorded conflict, at least two
+subscriptions depend on it through indexed trees or retained historical conflict
+paths, and an affected subscription is behind latest. Unrelated branches, other data versions and
 duplicate notifications do not trigger searches. A still-blocked root does not
 prevent another affected root from driving a retry. One complete proposed cut is
 committed per notification. The gate counts the dependents recorded before the
 notification changes paths; the new records are used to resolve the cut. Removing
 a dependency can be what unblocks progress, so refreshed indexes or retired
 watches must not retroactively disqualify that notification.
+
+A conflict within a single subscription tree has a separate retry path. The
+manager retains the exact dependency versions involved in a failed expansion
+and retries the waiting root when one changes. This does not require two
+dependent subscriptions: one internally inconsistent tree can block its root.
+
 `cleanup_conflicts()` runs after the attempt and retires caught-up roots and
 historical paths whose root candidates fall below current. A successor version
 never closes the older version's revision history: a later revision can still

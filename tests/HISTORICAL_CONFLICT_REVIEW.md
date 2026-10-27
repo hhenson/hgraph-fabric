@@ -52,19 +52,18 @@ dependency. The resolver now reports consumer versions on paths that disagreed,
 and the manager retains those paths while their root candidates remain within
 the current/latest bounds and a recorded subscription is still waiting.
 
-The existing wakeup policy still requires two dependent subscriptions and an
-affected waiting root; this example has both A and C. Historical path owners
+The cross-subscription wakeup policy requires two dependent subscriptions and
+an affected waiting root; this example has both A and C. Historical path owners
 count alongside indexed current/latest dependents. Changing X's revision
 cannot change the X version recorded by a consumer, so the mismatched endpoint
 does not acquire a soft watch merely because of this conflict.
 
 ## Retirement and regression coverage
 
-Root candidates below current and caught-up waiters are retired. A successor's
-revision-zero link records a predecessor snapshot, not its final count. Older
-versions remain revisable, so publishing a successor does not retire a still
-admissible historical watch. Duplicate or older notifications do not retry an
-unchanged historical watch.
+Root candidates below current and caught-up waiters are retired. Each version
+has its own revision head and remains revisable after a successor is published,
+so a successor does not retire a still-admissible historical watch. Duplicate
+or older notifications do not retry an unchanged historical watch.
 
 Eligibility uses the dependent subscriptions recorded before processing the
 notification. Resolution uses the updated records; watch retirement follows
