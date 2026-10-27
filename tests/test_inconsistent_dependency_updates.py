@@ -17,11 +17,11 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
         for version in (1, 2):
             history.add("universe", version)
         for sibling in ("market", "window"):
-            history.add(sibling, 100, dependencies=(("universe", 1),))
-        dependencies = (("market", 100), ("window", 100))
-        history.add("root", 100, dependencies=dependencies)
+            history.add(sibling, 1, dependencies=(("universe", 1),))
+        dependencies = (("market", 1), ("window", 1))
+        history.add("root", 1, dependencies=dependencies)
         if peer:
-            history.add("peer", 100)
+            history.add("peer", 1)
         cache = HistoryCache(history)
         manager = DataSubscriptionManager(cache)
         manager.add_subscriptions(("root", "peer") if peer else ("root",))
@@ -31,16 +31,16 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
     def test_cut_resolves_sibling_revision_history_in_either_delivery_order(self):
         for order in permutations(("market", "window")):
             for peer in (False, True):
-                for version, count in ((200, 0), (100, 1)):
+                for version, count in ((200, 0), (1, 1)):
                     with self.subTest(order=order, peer=peer, version=version):
                         history, cache, manager, dependencies = self.seed(peer)
                         before = current_cut(manager)
-                        manager.apply_update(history.add(order[0], 100, 1, (("universe", 2),)))
+                        manager.apply_update(history.add(order[0], 1, 1, (("universe", 2),)))
                         update = history.add("root", version, count, dependencies)
                         self.assertEqual(manager.apply_update(update), {("root", 200)} if count == 0 else set())
                         self.assertEqual(current_cut(manager)["root"], ("root", version, count))
-                        self.assertEqual(manager._subscriptions["root"].current_dependency_revisions[(order[0], 100)],
-                                         (order[0], 100, 0))
+                        self.assertEqual(manager._subscriptions["root"].current_dependency_revisions[(order[0], 1)],
+                                         (order[0], 1, 0))
                         for universe in (1, 2):
                             self.assertEqual(manager._dependents[("universe", universe)], {"root"})
                         # Neither an unrelated item nor another sibling version
@@ -49,7 +49,7 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
                             manager.apply_update(history.add("unrelated", 1))
                             manager.apply_update(history.add(order[1], 200))
                             advance.assert_not_called()
-                        healed = history.add(order[1], 100, 1, (("universe", 2),))
+                        healed = history.add(order[1], 1, 1, (("universe", 2),))
                         self.assertEqual(manager.apply_update(healed), set())
                         self.assertEqual(manager._subscriptions["root"].current_revision, ("root", version, count))
                         self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
@@ -59,26 +59,26 @@ class InconsistentDependencyUpdateTests(unittest.TestCase):
 
     def test_resolving_another_subscriptions_history_allows_the_update(self):
         history, cache, manager, dependencies = self.seed(peer=True)
-        manager.apply_update(history.add("market", 100, 1, (("universe", 2),)))
+        manager.apply_update(history.add("market", 1, 1, (("universe", 2),)))
         before = current_cut(manager)
         self.assertEqual(manager.apply_update(history.add("peer", 200)), {("peer", 200)})
         self.assertEqual(current_cut(manager), before | {"peer": ("peer", 200, 0)})
-        self.assertEqual(manager._subscriptions["root"].current_dependency_revisions[("market", 100)], ("market", 100, 0))
-        self.assertEqual(manager.apply_update(history.add("window", 100, 1, (("universe", 2),))), set())
+        self.assertEqual(manager._subscriptions["root"].current_dependency_revisions[("market", 1)], ("market", 1, 0))
+        self.assertEqual(manager.apply_update(history.add("window", 1, 1, (("universe", 2),))), set())
         self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))
 
     def test_explicit_cut_retains_last_accepted_selection_while_waiting(self):
         history, cache, manager, dependencies = self.seed()
         before = current_cut(manager)
-        manager.apply_update(history.add("market", 100, 1, (("universe", 2),)))
-        self.assertEqual(manager.get_consistent_cut(), {("root", 100)})
+        manager.apply_update(history.add("market", 1, 1, (("universe", 2),)))
+        self.assertEqual(manager.get_consistent_cut(), {("root", 1)})
         self.assertEqual(current_cut(manager), before)
 
     def test_bad_storage_is_not_hidden_by_an_earlier_sibling_mismatch(self):
         for broken in ("missing", "malformed"):
             with self.subTest(broken=broken):
                 history, cache, manager, dependencies = self.seed()
-                history.add("market", 100, 1, (("universe", 2),))
+                history.add("market", 1, 1, (("universe", 2),))
                 history.add("root", 200, dependencies=(*dependencies, ("broken", 1)))
                 if broken == "malformed":
                     history.add("broken", 1, dependencies=(("universe", 1), ("universe", 2)))

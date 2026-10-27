@@ -135,21 +135,21 @@ class Stream:
 
 def path(history, prefix, depth, shape, dependency):
     """Build a shared chain or repeated diamonds above a revision-bearing tip."""
-    history.add(prefix, 100, dependencies=(dependency,))
-    tip = (prefix, 100)
+    history.add(prefix, 1, dependencies=(dependency,))
+    tip = (prefix, 1)
     for level in range(depth):
         if shape == "diamond":
             sides = []
             for side in ("left", "right"):
                 name = f"{prefix}-{level}-{side}"
-                history.add(name, 100, dependencies=(tip,))
-                sides.append((name, 100))
+                history.add(name, 1, dependencies=(tip,))
+                sides.append((name, 1))
             dependencies = tuple(sides)
         else:
             dependencies = (tip,)
         name = f"{prefix}-{level}"
-        history.add(name, 100, dependencies=dependencies)
-        tip = name, 100
+        history.add(name, 1, dependencies=dependencies)
+        tip = name, 1
     return tip
 
 
@@ -165,13 +165,13 @@ class DeepTransitionTests(unittest.TestCase):
                 history.add("x", 1)
                 tip = path(history, "middle", depth, shape, ("x", 1))
                 for root in ("a", "b", "peer"):
-                    history.add(root, 100, dependencies=(("x", 1),) if root == "peer" else ())
+                    history.add(root, 1, dependencies=(("x", 1),) if root == "peer" else ())
                 stream = Stream(self, history, order, shared)
                 middle_count = 0
-                for step, source in enumerate((7, 53, 500, 9999), 1):
+                for step, source in enumerate((2, 3, 4, 5), 1):
                     # A new data version by itself does not change pinned trees.
                     stream.publish(history.add("x", source))
-                    root_version, root_count = (100, 2 * step - 1) if counts else (100 + step * step * 137, 0)
+                    root_version, root_count = (1, 2 * step - 1) if counts else (1 + step, 0)
                     stream.publish(history.add("peer", root_version, step if counts else 0,
                                                dependencies=(("x", source),)))
                     for root in ("a", "b"):
@@ -179,7 +179,7 @@ class DeepTransitionTests(unittest.TestCase):
                     # Current remains on the previous source. Removing x from
                     # the middle releases every root without new root records.
                     middle_count += 1
-                    stream.publish(history.add("middle", 100, middle_count))
+                    stream.publish(history.add("middle", 1, middle_count))
                     self.assertEqual(current_cut(stream.managers[0]),
                                      {root: history.heads[root] for root in order})
                     self.assertEqual(stream.managers[0]._conflicts, {})
@@ -187,7 +187,7 @@ class DeepTransitionTests(unittest.TestCase):
                     # All roots already latest: refresh, with no cut search.
                     middle_count += 1
                     with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut") as compare:
-                        stream.publish(history.add("middle", 100, middle_count, dependencies=(("x", source),)))
+                        stream.publish(history.add("middle", 1, middle_count, dependencies=(("x", source),)))
                     compare.assert_not_called()
                     self.assertTrue(history.consistent(current_cut(stream.managers[0])))
                     # Retire both paths before the next round. This avoids
@@ -211,25 +211,25 @@ class DeepTransitionTests(unittest.TestCase):
                                         "diamond" if seed % 2 else "chain", (source, 1))
                 roots = ["a", "b", "c", "d"]
                 for root in roots:
-                    history.add(root, 100, dependencies=tuple((source, 1) for source in sources))
+                    history.add(root, 1, dependencies=tuple((source, 1) for source in sources))
                 rng.shuffle(roots)
                 stream = Stream(self, history, roots, shared=seed % 2 == 0)
                 for step in range(60):
                     with self.subTest(step=step):
                         source = rng.choice(sources)
                         if step % 3 == 0:
-                            version = history.heads[source][1] + rng.choice((7, 113, 1009))
+                            version = history.heads[source][1] + 1
                             stream.publish(history.add(source, version))
                         elif step % 3 == 1:
                             name = f"m-{source}"
                             count = history.heads[name][2] + 1
                             dependencies = () if rng.randrange(3) == 0 else (history.heads[source][:2],)
-                            stream.publish(history.add(name, 100, count, dependencies=dependencies))
+                            stream.publish(history.add(name, 1, count, dependencies=dependencies))
                         else:
                             root = rng.choice(roots)
                             _, version, count = history.heads[root]
                             if rng.randrange(2):
-                                version, count = version + rng.choice((17, 211, 9001)), 0
+                                version, count = version + rng.choice((1, 1, 1)), 0
                             else:
                                 count += 1
                             dependencies = []
@@ -245,7 +245,7 @@ class DeepTransitionTests(unittest.TestCase):
                 # prior pattern of omissions, blocked roots, and dirty trees.
                 for root in roots:
                     _, version, count = history.heads[root]
-                    stream.publish(history.add(root, version + 100003,
+                    stream.publish(history.add(root, version + 1,
                                                dependencies=tuple(history.heads[s][:2] for s in sources)))
                 self.assertEqual(current_cut(stream.managers[0]), {root: history.heads[root] for root in roots})
                 self.assertEqual(stream.managers[0]._conflicts, {})
@@ -257,24 +257,24 @@ class DeepTransitionTests(unittest.TestCase):
                     history = History()
                     history.add("x", 1)
                     history.add("x", 7)
-                    history.add("m", 100, dependencies=(("x", 1),))
+                    history.add("m", 1, dependencies=(("x", 1),))
                     for root in ("a", "b"):
-                        history.add(root, 100)
-                        history.add(root, 9000, dependencies=(("m", 100),))
-                    history.add("peer", 100, dependencies=(("x", 7),))
+                        history.add(root, 1)
+                        history.add(root, 2, dependencies=(("m", 1),))
+                    history.add("peer", 1, dependencies=(("x", 7),))
                     stream = Stream(self, history, order, shared)
-                    self.assertEqual(set(stream.managers[0]._conflicts), {("m", 100)})
+                    self.assertEqual(set(stream.managers[0]._conflicts), {("m", 1)})
                     # M keeps the mismatch, but moves it down a newly introduced
                     # path. Its next notification must install an N watch.
                     stream.publish(history.add("n", 5003, dependencies=(("x", 1),)))
-                    stream.publish(history.add("m", 100, 1, dependencies=(("n", 5003),)))
-                    self.assertEqual(set(stream.managers[0]._conflicts), {("m", 100), ("n", 5003)})
+                    stream.publish(history.add("m", 1, 1, dependencies=(("n", 5003),)))
+                    self.assertEqual(set(stream.managers[0]._conflicts), {("m", 1), ("n", 5003)})
                     self.assertEqual(stream.publish(history.add("n", 5003, 1, dependencies=(("x", 7),))),
-                                     {("a", 9000), ("b", 9000)})
+                                     {("a", 2), ("b", 2)})
                     self.assertEqual(stream.managers[0]._conflicts, {})
                     # The committed graph still uses N until another cut is
                     # selected. Retire it after committing the newer M path.
-                    stream.publish(history.add("m", 100, 2, dependencies=(("x", 7),)))
+                    stream.publish(history.add("m", 1, 2, dependencies=(("x", 7),)))
                     self.assertIn(("n", 5003), stream.managers[0]._dependents)
                     for manager in stream.managers:
                         manager.get_consistent_cut()
@@ -284,7 +284,7 @@ class DeepTransitionTests(unittest.TestCase):
                     compare.assert_not_called()
 
     def test_long_count_search_matches_exhaustive_exact_then_absence_oracle(self):
-        # Three sparse versions with 17, 23 and 33 consecutive counts. Test
+        # Three contiguous versions with 17, 23 and 33 consecutive counts. Test
         # ceilings/floors at version boundaries and inside versions, plus
         # isolated holes and long disappearance/reappearance runs.
         floors = (0, 1, 16, 17, 18, 39, 40, 60, 72)
@@ -298,7 +298,7 @@ class DeepTransitionTests(unittest.TestCase):
                     dependency = (f"hop-{level}", version)
             revisions = []
             values = []
-            for version, length in ((100, 17), (5003, 23), (90000001, 33)):
+            for version, length in ((1, 17), (2, 23), (3, 33)):
                 for count in range(length):
                     index = len(revisions)
                     value = 1 + index // 9
@@ -344,18 +344,18 @@ class DeepTransitionTests(unittest.TestCase):
                     self.assertIsNone(left.current_revision)
                     self.assertIsNone(right.current_revision)
 
-    def test_sparse_intermediate_version_rotation_preserves_pinned_trees(self):
+    def test_contiguous_intermediate_version_rotation_preserves_pinned_trees(self):
         for counts in (False, True):
             with self.subTest(counts=counts):
                 history = History()
                 history.add("x", 1)
-                history.add("m", 100, dependencies=(("x", 1),))
+                history.add("m", 1, dependencies=(("x", 1),))
                 for root in ("a", "b", "peer"):
-                    history.add(root, 100, dependencies=(("x", 1),) if root == "peer" else ())
+                    history.add(root, 1, dependencies=(("x", 1),) if root == "peer" else ())
                 stream = Stream(self, history, ("a", "b", "peer"))
                 previous_source = 1
-                old_versions = [100]
-                for step, version in enumerate((137, 5003, 9001, 999983, 10000019, 90000001), 1):
+                old_versions = [1]
+                for step, version in enumerate((2, 3, 4, 5, 6, 7), 1):
                     current_graphs = {key: sub.current(stream.cache)
                                       for key, sub in stream.managers[0]._subscriptions.items()}
                     # A new M data version cannot mutate references to its
@@ -368,12 +368,12 @@ class DeepTransitionTests(unittest.TestCase):
                     for root in ("a", "b"):
                         _, root_version, count = history.heads[root]
                         stream.publish(history.add(root, root_version, count + 1))
-                    source = previous_source + step * 113
+                    source = previous_source + 1
                     stream.publish(history.add("x", source))
-                    stream.publish(history.add("peer", 100, step, dependencies=(("x", source),)))
+                    stream.publish(history.add("peer", 1, step, dependencies=(("x", source),)))
                     for root in ("a", "b"):
                         _, root_version, count = history.heads[root]
-                        stream.publish(history.add(root, root_version if counts else version + 100000000,
+                        stream.publish(history.add(root, root_version if counts else version,
                                                    count + 1 if counts else 0, dependencies=(("m", version),)))
                     self.assertEqual(set(stream.managers[0]._conflicts), {("m", version)})
                     stream.publish(history.add("m", version, 1, dependencies=(("x", source),)))
@@ -383,7 +383,7 @@ class DeepTransitionTests(unittest.TestCase):
                     old_versions.append(version)
                     previous_source = source
                 # A fresh cache must discover each old version's maximum count
-                # by following revision-zero links, without arithmetic on IDs.
+                # directly from that version's own revision head.
                 fresh = HistoryCache(history)
                 for version in old_versions:
                     expected = max(r for r in history.records if r[:2] == ("m", version))
@@ -396,20 +396,20 @@ class DeepTransitionTests(unittest.TestCase):
                 history = History()
                 history.add("x", 1)
                 history.add("x", 7)
-                history.add("m", 100)
-                history.add("m", 100, 1, dependencies=(("x", 1),))
+                history.add("m", 1)
+                history.add("m", 1, 1, dependencies=(("x", 1),))
                 for root in ("a", "b"):
-                    history.add(root, 100)
-                    history.add(root, 9000, dependencies=(("m", 100),))
-                history.add("peer", 100, dependencies=(("x", 7),))
-                history.add("independent", 100)
+                    history.add(root, 1)
+                    history.add(root, 2, dependencies=(("m", 1),))
+                history.add("peer", 1, dependencies=(("x", 7),))
+                history.add("independent", 1)
                 cache = HistoryCache(history)
                 managers = [DataSubscriptionManager(cache) for _ in groups]
                 for manager, roots in zip(managers, groups):
                     manager.add_subscriptions(roots)
                     manager.get_consistent_cut()
-                self.assertEqual(managers[1]._subscriptions["m"].current_revision, ("m", 100, 0))
-                update = history.add("m", 100, 2, dependencies=(("x", 7),))
+                self.assertEqual(managers[1]._subscriptions["m"].current_revision, ("m", 1, 0))
+                update = history.add("m", 1, 2, dependencies=(("x", 7),))
                 cache.apply_update(update)
                 results = {}
                 for index in delivery:
@@ -437,12 +437,12 @@ class DeepTransitionTests(unittest.TestCase):
                 history.add("x", 7)
                 tip = path(history, "m", 12, shape, ("x", 1))
                 for root in ("a", "b"):
-                    history.add(root, 100, dependencies=(tip,))
+                    history.add(root, 1, dependencies=(tip,))
                 stream = Stream(self, history, ("a", "b"))
                 manager = stream.managers[0]
                 before = current_cut(manager)
                 dependencies = (("missing", 99),) if missing else (("x", 1), ("x", 7))
-                update = history.add("m", 100, 1, dependencies=dependencies)
+                update = history.add("m", 1, 1, dependencies=dependencies)
                 with self.assertRaises(KeyError if missing else ValueError):
                     manager.apply_update(update)
                 self.assertEqual(current_cut(manager), before)
@@ -452,21 +452,21 @@ class DeepTransitionTests(unittest.TestCase):
         history = History()
         for version in (1, 3, 5, 7):
             history.add("x", version)
-        history.add("m", 100, dependencies=(("x", 1),))
-        history.add("a", 100)
-        history.add("a", 200, 0, dependencies=(("m", 100),))
+        history.add("m", 1, dependencies=(("x", 1),))
+        history.add("a", 1)
+        history.add("a", 200, 0, dependencies=(("m", 1),))
         history.add("a", 200, 1, dependencies=(("x", 3),))
         history.add("a", 200, 2, dependencies=(("x", 5),))
-        history.add("b", 100, dependencies=(("x", 3),))
+        history.add("b", 1, dependencies=(("x", 3),))
         cache = HistoryCache(history)
         manager = DataSubscriptionManager(cache)
         manager.add_subscriptions(("a", "b"))
         manager.get_consistent_cut()
-        exact = {"a": ("a", 200, 1), "b": ("b", 100, 0)}
+        exact = {"a": ("a", 200, 1), "b": ("b", 1, 0)}
         self.assertEqual(current_cut(manager), exact)
         # M advances after A stopped consuming it. Delivery is coordinated;
         # there are no exceptions, missing records or decreasing source IDs.
-        manager.apply_update(history.add("m", 100, 1, dependencies=(("x", 7),)))
+        manager.apply_update(history.add("m", 1, 1, dependencies=(("x", 7),)))
         self.assertEqual([history.nodes(("a", 200, count))["x"] for count in range(3)], [7, 3, 5])
         self.assertTrue(history.consistent(exact))
         # A new manager must prefer the still-valid exact count 1 to omitting X
@@ -482,18 +482,18 @@ class DeepTransitionTests(unittest.TestCase):
         history = History()
         for version in range(1, 10):
             history.add("x", version)
-        history.add("m", 100, dependencies=(("x", 4),))
-        history.add("a", 100)
+        history.add("m", 1, dependencies=(("x", 4),))
+        history.add("a", 1)
         for count, source in enumerate((1, 2, 3, None, 5, 6, 9)):
-            history.add("a", 200, count, dependencies=(("m", 100),) if source is None else (("x", source),))
-        history.add("b", 100, dependencies=(("x", 6),))
+            history.add("a", 200, count, dependencies=(("m", 1),) if source is None else (("x", source),))
+        history.add("b", 1, dependencies=(("x", 6),))
         cache = HistoryCache(history)
         manager = DataSubscriptionManager(cache)
         manager.add_subscriptions(("a", "b"))
         manager.get_consistent_cut()
-        exact = {"a": ("a", 200, 5), "b": ("b", 100, 0)}
+        exact = {"a": ("a", 200, 5), "b": ("b", 1, 0)}
         self.assertEqual(current_cut(manager), exact)
-        manager.apply_update(history.add("m", 100, 1, dependencies=(("x", 7),)))
+        manager.apply_update(history.add("m", 1, 1, dependencies=(("x", 7),)))
         self.assertEqual([history.nodes(("a", 200, count))["x"] for count in range(7)], [1, 2, 3, 7, 5, 6, 9])
         self.assertTrue(history.consistent(exact))
         # Endpoints still bracket X@6, but the refreshed middle probe X@7
@@ -515,25 +515,25 @@ class DeepTransitionTests(unittest.TestCase):
                 history.add("x", version)
             for count, value in enumerate(values):
                 if value is not None:
-                    history.add(f"m{count}", 100, dependencies=(("x", 1),))
-                history.add("a", 100, count,
-                            dependencies=() if value is None else ((f"m{count}", 100),))
-            history.add("a", 100, 5, dependencies=(("x", 9),))
-            history.add("b", 100, dependencies=(("x", 2),))
+                    history.add(f"m{count}", 1, dependencies=(("x", 1),))
+                history.add("a", 1, count,
+                            dependencies=() if value is None else ((f"m{count}", 1),))
+            history.add("a", 1, 5, dependencies=(("x", 9),))
+            history.add("b", 1, dependencies=(("x", 2),))
             for count, value in enumerate(values):
                 if value is not None:
-                    history.add(f"m{count}", 100, 1, dependencies=(("x", value),))
+                    history.add(f"m{count}", 1, 1, dependencies=(("x", value),))
             for floor, reverse in product(range(6), (False, True)):
                 with self.subTest(values=values, floor=floor, reverse=reverse):
                     cache = HistoryCache(history)
                     left, right = DataSubscriptionGraph("a"), DataSubscriptionGraph("b")
-                    left.proposed_revision, right.proposed_revision = ("a", 100, 5), ("b", 100, 0)
+                    left.proposed_revision, right.proposed_revision = ("a", 1, 5), ("b", 1, 0)
                     candidates = range(4, floor - 1, -1)
                     exact = next((count for count in candidates if values[count] == 2), None)
                     omitted = next((count for count in candidates if values[count] is None), None)
                     expected = exact if exact is not None else omitted
                     pair = (right, left) if reverse else (left, right)
-                    bounds = (("a", 100, floor), ("b", 100, 0))
+                    bounds = (("a", 1, floor), ("b", 1, 0))
                     if reverse:
                         bounds = bounds[::-1]
                     if expected is None:
@@ -542,7 +542,7 @@ class DeepTransitionTests(unittest.TestCase):
                     else:
                         result = find_consistent_cut(*pair, cache, lower_bounds=bounds)
                         result = result[::-1] if reverse else result
-                        self.assertEqual(result, (("a", 100, expected), ("b", 100, 0)))
+                        self.assertEqual(result, (("a", 1, expected), ("b", 1, 0)))
                     loaded_counts = [revision[2] for kind, revision in cache.loads
                                      if kind == "revision" and revision[0] == "a"]
                     # The zero/floor probe bounds the search even when an exact

@@ -76,7 +76,7 @@ class StorageContract:
     def test_revision_metadata_preserves_nullable_dependencies_and_time(self):
         for count, deps in enumerate((None, (), (("source.a", 7), ("b", 99)))):
             with self.subTest(deps=deps):
-                details = DataRevisionDetails(deps, deps, (7, 4) if count == 0 else None, AS_OF)
+                details = DataRevisionDetails(deps, deps, AS_OF)
                 if count == 0:
                     self.cache().write_version(("prices", 1), pa.table({"x": [1]}), details)
                 else:
@@ -96,7 +96,7 @@ class StorageContract:
         reader = self.cache()
         self.assertEqual(list(reader.version_history("prices")), [("prices", 2, 0), ("prices", 1, 1)])
         self.assertEqual(reader.get_latest_revision(("prices", 1)), ("prices", 1, 1))
-        self.assertEqual(reader.get_revision(("prices", 2, 0)).previous_revision, (1, 1))
+        self.assertNotIn("previous_revision", vars(reader.get_revision(("prices", 2, 0))))
         self.assertEqual(reader.get_revision(("prices", 1, 1)).weak_dependencies, (("weak", 8),))
         self.assertTrue(reader.get_version(("prices", 1)).equals(original, check_metadata=True))
 
@@ -158,7 +158,7 @@ class StorageContract:
     def test_invalid_dependency_ids_cannot_be_persisted(self):
         for deps, weak in (((("source/a", 7),), ()), ((), (("Source", 7),))):
             with self.subTest(dependencies=deps, weak_dependencies=weak):
-                details = DataRevisionDetails(deps, weak, None, AS_OF)
+                details = DataRevisionDetails(deps, weak, AS_OF)
                 with patch("obstore.put") as put, self.assertRaises(ValueError):
                     self.cache().write_revision(("prices", 1, 0), details)
                 put.assert_not_called()
@@ -204,7 +204,7 @@ class StorageContract:
             self.cache().write_version(("prices", 1), pa.table({"price": [999]}), original_details)
         writer.write_dependencies("prices", (("source", 1),))
         with self.assertRaises(obstore.exceptions.AlreadyExistsError):
-            self.cache().write_revision(("prices", 1, 1), DataRevisionDetails(None, None, None, AS_OF))
+            self.cache().write_revision(("prices", 1, 1), DataRevisionDetails(None, None, AS_OF))
         self.assertTrue(self.cache().get_version(("prices", 1)).equals(original, check_metadata=True))
         self.assertEqual(self.cache().get_revision(("prices", 1, 0)), original_details)
 
@@ -262,7 +262,7 @@ class StorageContract:
                 )
                 self.assertEqual(update.revision, (version, 0))
                 self.assertEqual(written.schema.metadata[b"version"], str(version).encode())
-                self.assertEqual(update.previous_revision, (version - 1, 0) if version > 1 else None)
+                self.assertNotIn("previous_revision", vars(update))
 
     def test_same_version_race_cannot_mix_table_and_revision_metadata(self):
         for existing in (False, True):
@@ -319,10 +319,10 @@ class StorageContract:
                 reader = self.cache(first_kind)
                 self.assertEqual(reader.load_latest("prices"), ("prices", 2, 0))
                 self.assertEqual(reader.load_latest_revision(("prices", 1)), ("prices", 1, 1))
-                self.assertEqual(reader.get_revision(("prices", 2, 0)).previous_revision, (1, 0))
+                self.assertNotIn("previous_revision", vars(reader.get_revision(("prices", 2, 0))))
                 self.assertEqual(list(reader.version_history("prices")), [("prices", 2, 0), ("prices", 1, 1)])
 
-    def test_new_version_captures_stored_predecessor_snapshot(self):
+    def test_new_version_preserves_independent_older_revision_head(self):
         writer = self.cache()
         self.publish(writer)
         successor = self.cache()
@@ -331,7 +331,7 @@ class StorageContract:
         writer.write_dependencies("prices", (("source", 2),))
         _, update = self.publish(successor)
         self.assertEqual(update.revision, (2, 0))
-        self.assertEqual(update.previous_revision, (1, 2))
+        self.assertNotIn("previous_revision", vars(update))
         self.assertEqual(list(self.cache().version_history("prices")), [("prices", 2, 0), ("prices", 1, 2)])
 
     def test_dependency_write_uses_stored_version_and_noop_does_not_notify(self):
@@ -348,7 +348,7 @@ class StorageContract:
         _, changed = session.publish(id="prices", dependencies=(("source", 2),))
         self.assertEqual(changed.revision, (2, 2))
         transport.send.assert_called_once_with(changed)
-        self.assertEqual(self.cache().get_revision(("prices", 2, 0)).previous_revision, (1, 0))
+        self.assertNotIn("previous_revision", vars(self.cache().get_revision(("prices", 2, 0))))
 
     def test_invalid_direct_dependency_write_does_not_consume_revision(self):
         writer = self.cache()
@@ -494,7 +494,7 @@ class StorageContract:
         for update in self.cache().recover("m"):
             self.assertEqual(session.apply_update(update), {})
 
-    def test_root_history_search_includes_revisions_after_successor_snapshot(self):
+    def test_root_history_search_includes_revisions_after_successor_publication(self):
         writer = self.cache()
         for value in (1, 2, 3):
             writer.write(pa.table({"value": [value]}), id="x")
@@ -502,7 +502,7 @@ class StorageContract:
         writer.write(pa.table({"value": [2]}), id="a", dependencies=(("x", 3),))
         writer.write(pa.table({"value": [1]}), id="b", dependencies=(("x", 2),))
         writer.write_dependencies("a", (("x", 2),), version=1)
-        self.assertEqual(writer.get_revision(("a", 2, 0)).previous_revision, (1, 0))
+        self.assertNotIn("previous_revision", vars(writer.get_revision(("a", 2, 0))))
         session = DataFabricSession(self.cache())
         session.add_subscriptions(("a", "b"))
         cut = session.get_consistent_cut()

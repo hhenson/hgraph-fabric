@@ -117,7 +117,6 @@ class DataCache(ABC):
         details = DataRevisionDetails(
             dependencies=dependencies,
             weak_dependencies=weak_dependencies,
-            previous_revision=previous[1:] if previous is not None else None,
             as_of=as_of,
         )
         self.write_version((id, version), data, details)
@@ -125,7 +124,7 @@ class DataCache(ABC):
         self.write_latest_version((id, version))
 
         update = DataUpdateDetails(
-            id=id, revision=(version, 0), previous_revision=details.previous_revision,
+            id=id, revision=(version, 0),
             dependencies=dependencies, weak_dependencies=weak_dependencies,
             as_of=as_of,
         )
@@ -169,12 +168,12 @@ class DataCache(ABC):
             revision_id = (id, previous[1], previous[2] + 1)
             details = DataRevisionDetails(
                 dependencies=dependencies, weak_dependencies=weak_dependencies,
-                previous_revision=None, as_of=as_of if as_of is not None else datetime.now(UTC),
+                as_of=as_of if as_of is not None else datetime.now(UTC),
             )
             self.write_revision(revision_id, details)
             self.write_latest_revision(revision_id)
         update = DataUpdateDetails(
-            id=id, revision=revision_id[1:], previous_revision=details.previous_revision,
+            id=id, revision=revision_id[1:],
             dependencies=details.dependencies, weak_dependencies=details.weak_dependencies,
             as_of=details.as_of,
         )
@@ -202,7 +201,7 @@ class DataCache(ABC):
         return self._version_history(data_id, peek=False)
 
     def peek_version_history(self, data_id: DataId) -> Iterator[DataRevisionId]:
-        """Yield the cached history prefix; stop at an uncached version head or header."""
+        """Yield cached version heads newest first; stop at the first uncached head."""
         return self._version_history(data_id, peek=True)
 
     def _version_history(self, data_id: DataId, *, peek: bool) -> Iterator[DataRevisionId]:
@@ -210,8 +209,7 @@ class DataCache(ABC):
         while revision_id is not None:
             if revision_id[0] != data_id:
                 raise ValueError("Version history points to a different data ID")
-            # A stored link captures a count at publication time. Include later
-            # notifications, whether still pending or already resolved by lookup.
+            # Include notifications received since this head was first resolved.
             version_id = revision_id[:2]
             revision_id = max(
                 revision_id,
@@ -219,20 +217,9 @@ class DataCache(ABC):
                 self._latest_revisions.get(version_id, revision_id),
             )
             yield revision_id
-            # The predecessor count is a publication-time snapshot. Resolve
-            # the predecessor's own head: it can have received later revisions.
-            header_id = (data_id, revision_id[1], 0)
-            header = self.peek_revision(header_id) if peek else self.get_revision(header_id)
-            if header is None:
+            if revision_id[1] == 1:
                 return
-            previous = header.previous_revision
-            # Strictly decreasing versions also rule out cycles without keeping
-            # a set of every visited version for a long history.
-            if previous is not None and previous[0] >= revision_id[1]:
-                raise ValueError("Revision-zero history must point to an older version")
-            if previous is None:
-                return
-            previous_id = (data_id, previous[0])
+            previous_id = (data_id, revision_id[1] - 1)
             revision_id = (self.peek_latest_revision(previous_id) if peek
                            else self.get_latest_revision(previous_id))
 
@@ -253,7 +240,6 @@ class DataCache(ABC):
         self._revisions[revision_id] = DataRevisionDetails(
             dependencies=update.dependencies,
             weak_dependencies=update.weak_dependencies,
-            previous_revision=update.previous_revision,
             as_of=update.as_of,
         )
         version_id = revision_id[:2]

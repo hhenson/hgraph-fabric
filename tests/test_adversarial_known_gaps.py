@@ -14,10 +14,10 @@ class AdversarialKnownGaps(unittest.TestCase):
             history.add(source, 1)
             history.add(source, 2)
         for root in ("a", "b"):
-            history.add(root, 100, dependencies=(("x", 1), ("y", 1)))
-        history.add("a", 200, dependencies=(("x", 2), ("y", 1)))
-        history.add("b", 200, dependencies=(("x", 1), ("y", 2)))
-        witness = {root: (root, 100, 0) for root in ("a", "b")}
+            history.add(root, 1, dependencies=(("x", 1), ("y", 1)))
+        history.add("a", 2, dependencies=(("x", 2), ("y", 1)))
+        history.add("b", 2, dependencies=(("x", 1), ("y", 2)))
+        witness = {root: (root, 1, 0) for root in ("a", "b")}
         self.assertTrue(history.consistent(witness))
         manager = DataSubscriptionManager(HistoryCache(history))
         manager.add_subscriptions(("a", "b"))
@@ -25,13 +25,13 @@ class AdversarialKnownGaps(unittest.TestCase):
 
     def test_single_subscription_does_not_commit_unloadable_tree(self):
         history = History()
-        history.add("a", 100)
+        history.add("a", 1)
         cache = HistoryCache(history)
         manager = DataSubscriptionManager(cache)
         manager.add_subscription("a")
         manager.get_consistent_cut()
         before = current_cut(manager)
-        update = history.add("a", 200, dependencies=(("missing", 1),))
+        update = history.add("a", 2, dependencies=(("missing", 1),))
         # Multi-subscription comparisons detect this error before commit.
         # The same failure isolation is needed when there are no pair checks.
         with self.assertRaises(KeyError):
@@ -42,13 +42,13 @@ class AdversarialKnownGaps(unittest.TestCase):
         history = History()
         history.add("x", 1)
         history.add("x", 2)
-        history.add("middle", 100, dependencies=(("x", 1),))
-        history.add("root", 100, dependencies=(("middle", 100),))
+        history.add("middle", 1, dependencies=(("x", 1),))
+        history.add("root", 1, dependencies=(("middle", 1),))
         warm = DataSubscriptionManager(HistoryCache(history))
         warm.add_subscription("root")
-        warm.get_consistent_cut()  # Retains root -> middle@100 -> x@1.
-        warm.apply_update(history.add("middle", 100, 1, dependencies=(("x", 2),)))
-        history.add("peer", 100, dependencies=(("x", 2),))
+        warm.get_consistent_cut()  # Retains root -> middle@1 -> x@1.
+        warm.apply_update(history.add("middle", 1, 1, dependencies=(("x", 2),)))
+        history.add("peer", 1, dependencies=(("x", 2),))
         warm.add_subscription("peer")
         cold = DataSubscriptionManager(HistoryCache(history))
         cold.add_subscriptions(("root", "peer"))
@@ -64,16 +64,16 @@ class AdversarialKnownGaps(unittest.TestCase):
         history = History()
         history.add("x", 1)
         history.add("x", 2)
-        history.add("a", 100)
-        history.add("b", 100, dependencies=(("x", 1),))
-        history.add("b", 200)
-        history.add("c", 100, dependencies=(("x", 1),))
+        history.add("a", 1)
+        history.add("b", 1, dependencies=(("x", 1),))
+        history.add("b", 2)
+        history.add("c", 1, dependencies=(("x", 1),))
         manager = DataSubscriptionManager(HistoryCache(history))
         manager.add_subscriptions(("a", "b", "c"))
         manager.get_consistent_cut()
-        self.assertEqual(manager.apply_update(history.add("b", 300, dependencies=(("x", 2),))), set())
-        update = history.add("a", 200)
-        witness = {"a": ("a", 200, 0), "b": ("b", 200, 0), "c": ("c", 100, 0)}
+        self.assertEqual(manager.apply_update(history.add("b", 3, dependencies=(("x", 2),))), set())
+        update = history.add("a", 2)
+        witness = {"a": ("a", 2, 0), "b": ("b", 2, 0), "c": ("c", 1, 0)}
         self.assertTrue(history.consistent(witness))
-        self.assertEqual(manager.apply_update(update), {("a", 200)})
+        self.assertEqual(manager.apply_update(update), {("a", 2)})
         self.assertEqual(current_cut(manager), witness)

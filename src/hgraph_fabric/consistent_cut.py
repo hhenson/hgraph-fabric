@@ -108,7 +108,7 @@ def find_consistent_cut(
         return (revision, right_revision) if leading_is_left else (left_revision, revision)
 
     # 3. Walk actual revisions newest first, respecting proposed/current bounds.
-    # Revision zero links to the preceding version. Resolve that version's own head;
+    # Address the preceding version directly and resolve its own head;
     # it can receive new revisions after its successor has been published.
     #
     # Each root candidate searches intermediate revisions within fixed data
@@ -287,8 +287,8 @@ def _revisions_backwards(
     revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None,
     search: RevisionSearch, constraints=None, *, include_no_data=False,
 ) -> Iterator[DataRevisionId]:
-    # Counts are consecutive within a version. Revision-zero links retain the
-    # preceding version when crossing a boundary; its own head supplies the count.
+    # Version and revision numbers are consecutive. Older versions have their
+    # own mutable revision heads; no predecessor links are needed.
     for version, maximum_count in _version_bounds(revision, cache, floor):
         minimum_count = floor[2] if floor is not None and version == floor[1] else 0
         # Reaching the subscribed parent uses the same zero-count probe and
@@ -329,9 +329,10 @@ def _version_bounds(
         yield version, maximum_count
         if floor is not None and version == floor[1]:
             return  # No need to load history preceding the committed version.
-        previous = cache.get_revision((data_id, version, 0)).previous_revision
-        if previous is None:
+        if version == 1:
             return
-        if previous[0] >= version:
-            raise ValueError("Revision-zero history must point to an older version")
-        _, version, maximum_count = cache.get_latest_revision((data_id, previous[0]))
+        version -= 1
+        # Probe the lower count before looking up the older version's upper
+        # count. counts() uses the immediate records to bound the search.
+        cache.get_revision((data_id, version, 0))
+        _, _, maximum_count = cache.get_latest_revision((data_id, version))

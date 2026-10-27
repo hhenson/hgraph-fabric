@@ -208,7 +208,7 @@ class ThreadedSessionTests(unittest.TestCase):
             self.assertTrue(completed.wait(2))
 
         self.assertEqual([update.revision for update in updates], [(1, 0), (2, 0), (3, 0)])
-        self.assertEqual([update.previous_revision for update in updates], [None, (1, 0), (2, 0)])
+        self.assertEqual([update.revision for update in updates], [(1, 0), (2, 0), (3, 0)])
         self.assertEqual(self.cache.latest("output"), ("output", 3, 0))
         self.assertEqual(self.cache.latest_values["output"], ("output", 3, 0))
         for version, value, dependency in ((1, 11, 10), (2, 12, 10), (3, 21, 20)):

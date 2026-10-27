@@ -26,9 +26,9 @@ class CrossedHistoryTests(unittest.TestCase):
     def test_all_monotonic_two_input_paths_and_proposed_ceilings(self):
         # Six complete paths through the 3x3 input-version lattice. Every input
         # step is recorded. Check all pairs, intermediate ceilings, both argument
-        # orders, and sparse-version versus within-version-count histories.
+        # orders, and contiguous-version versus within-version-count histories.
         paths = sorted(set(permutations(("x", "x", "y", "y"))))
-        sparse = (100, 700, 9000, 50000, 100000)
+        versions = (1, 2, 3, 4, 5)
         for a_path, b_path, counts in product(paths, paths, (False, True)):
             history = self.sources()
             revisions = {}
@@ -38,7 +38,7 @@ class CrossedHistoryTests(unittest.TestCase):
                 for step, changed in enumerate((None, *path)):
                     if changed:
                         values[changed] += 1
-                    version, count = (9000, step) if counts else (sparse[step], 0)
+                    version, count = (1, step) if counts else (versions[step], 0)
                     history.add(root, version, count, tuple(values.items()))
                     revisions[root].append((root, version, count))
             for a_head, b_head, order in product(range(5), range(5), (("a", "b"), ("b", "a"))):
@@ -56,46 +56,46 @@ class CrossedHistoryTests(unittest.TestCase):
         history = self.sources()
         for root, final in (("a", (("x", 2), ("y", 1))), ("b", (("x", 1), ("y", 2)))):
             for count, dependencies in enumerate(((("x", 1), ("y", 1)), (("x", 1), ("y", 1)), final)):
-                history.add(root, 9000, count, dependencies)
+                history.add(root, 1, count, dependencies)
         manager = self.manager(history)
         a, b = manager._subscriptions.values()
         for sub in (a, b):
             sub.proposed_revision = sub.latest_revision
-            sub.current_revision = (sub.data_id, 9000, 0)
-        self.assertEqual(find_consistent_cut(a, b, manager._cache), (("a", 9000, 1), ("b", 9000, 1)))
-        self.assertEqual(find_consistent_cut(b, a, manager._cache), (("b", 9000, 1), ("a", 9000, 1)))
+            sub.current_revision = (sub.data_id, 1, 0)
+        self.assertEqual(find_consistent_cut(a, b, manager._cache), (("a", 1, 1), ("b", 1, 1)))
+        self.assertEqual(find_consistent_cut(b, a, manager._cache), (("b", 1, 1), ("a", 1, 1)))
         for sub in (a, b):
-            self.assertEqual(sub.proposed_revision, (sub.data_id, 9000, 2))
-            self.assertEqual(sub.current_revision, (sub.data_id, 9000, 0))
+            self.assertEqual(sub.proposed_revision, (sub.data_id, 1, 2))
+            self.assertEqual(sub.current_revision, (sub.data_id, 1, 0))
 
     def test_joint_exact_match_precedes_newer_dependency_omission(self):
         history = self.sources()
         for root in ("a", "b"):
-            history.add(root, 100, dependencies=(("x", 1), ("y", 1)))
-        history.add("a", 9000, dependencies=(("x", 2), ("y", 1)))
-        history.add("b", 700, dependencies=(("y", 1),))
-        history.add("b", 9000, dependencies=(("x", 1), ("y", 2)))
+            history.add(root, 1, dependencies=(("x", 1), ("y", 1)))
+        history.add("a", 2, dependencies=(("x", 2), ("y", 1)))
+        history.add("b", 2, dependencies=(("y", 1),))
+        history.add("b", 3, dependencies=(("x", 1), ("y", 2)))
         manager = self.manager(history)
-        # b@700 would agree with a@9000 by omitting x. Prefer the older pair
+        # b@2 would agree with a@2 by omitting x. Prefer the older pair
         # that retains both original common dependencies, as in the normal path.
-        self.assertEqual(manager.get_consistent_cut(), {("a", 100), ("b", 100)})
+        self.assertEqual(manager.get_consistent_cut(), {("a", 1), ("b", 1)})
 
     def test_historical_containment_is_rechecked_for_candidate_pairs(self):
         history = self.sources()
-        history.add("b", 100, dependencies=(("x", 1), ("y", 1)))
-        history.add("a", 100, dependencies=(("b", 100),))
-        history.add("a", 9000, dependencies=(("x", 2), ("y", 1)))
-        history.add("b", 9000, dependencies=(("x", 1), ("y", 2)))
+        history.add("b", 1, dependencies=(("x", 1), ("y", 1)))
+        history.add("a", 1, dependencies=(("b", 1),))
+        history.add("a", 2, dependencies=(("x", 2), ("y", 1)))
+        history.add("b", 2, dependencies=(("x", 1), ("y", 2)))
         manager = self.manager(history)
-        self.assertEqual(manager.get_consistent_cut(), {("a", 100), ("b", 100)})
+        self.assertEqual(manager.get_consistent_cut(), {("a", 1), ("b", 1)})
 
     def test_missing_fallback_history_propagates_without_committing(self):
         history = self.sources()
         for root in ("a", "b"):
-            history.add(root, 100, dependencies=(("x", 1), ("y", 1)))
-        history.add("a", 9000, dependencies=(("x", 2), ("y", 1)))
-        history.add("b", 9000, dependencies=(("x", 1), ("y", 2)))
-        del history.records[("b", 100, 0)]
+            history.add(root, 1, dependencies=(("x", 1), ("y", 1)))
+        history.add("a", 2, dependencies=(("x", 2), ("y", 1)))
+        history.add("b", 2, dependencies=(("x", 1), ("y", 2)))
+        del history.records[("b", 1, 0)]
         manager = self.manager(history)
         with self.assertRaises(KeyError):
             manager.get_consistent_cut()
@@ -103,23 +103,23 @@ class CrossedHistoryTests(unittest.TestCase):
 
     def test_ordinary_search_never_enters_the_fallback(self):
         history = self.sources()
-        for version, x in ((100, 1), (9000, 2)):
+        for version, x in ((1, 1), (2, 2)):
             history.add("a", version, dependencies=(("x", x),))
-        history.add("b", 100, dependencies=(("x", 1),))
+        history.add("b", 1, dependencies=(("x", 1),))
         manager = self.manager(history)
         with patch("hgraph_fabric.consistent_cut._search_both_histories", side_effect=AssertionError("Unexpected fallback")):
-            self.assertEqual(manager.get_consistent_cut(), {("a", 100), ("b", 100)})
+            self.assertEqual(manager.get_consistent_cut(), {("a", 1), ("b", 1)})
 
     def test_crossed_updates_keep_current_then_advance_when_both_catch_up(self):
         history = self.sources()
         for root in ("a", "b"):
-            history.add(root, 100, dependencies=(("x", 1), ("y", 1)))
+            history.add(root, 1, dependencies=(("x", 1), ("y", 1)))
         manager = self.manager(history)
         manager.get_consistent_cut()
         before = current_cut(manager)
         for root, dependencies in (("a", (("x", 2), ("y", 1))), ("b", (("x", 1), ("y", 2)))):
-            self.assertEqual(manager.apply_update(history.add(root, 9000, dependencies=dependencies)), set())
+            self.assertEqual(manager.apply_update(history.add(root, 2, dependencies=dependencies)), set())
             self.assertEqual(current_cut(manager), before)
-        self.assertEqual(manager.apply_update(history.add("a", 50000, dependencies=(("x", 2), ("y", 2)))), set())
-        self.assertEqual(manager.apply_update(history.add("b", 50000, dependencies=(("x", 2), ("y", 2)))), {("a", 50000), ("b", 50000)})
+        self.assertEqual(manager.apply_update(history.add("a", 3, dependencies=(("x", 2), ("y", 2)))), set())
+        self.assertEqual(manager.apply_update(history.add("b", 3, dependencies=(("x", 2), ("y", 2)))), {("a", 3), ("b", 3)})
         self.assertTrue(history.consistent(current_cut(manager), current_choices(manager)))

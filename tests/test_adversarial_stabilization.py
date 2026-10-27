@@ -14,7 +14,7 @@ class AdversarialStabilizationTests(unittest.TestCase):
         # 64 topologies * (3**4 - 1) selected-root/head configurations = 5,120.
         for mask in range(64):
             history = dag_history(mask)
-            for choices in product((None, 100, 9000), repeat=4):
+            for choices in product((None, 1, 2), repeat=4):
                 roots = [f"n{i}" for i, version in enumerate(choices) if version is not None]
                 if not roots:
                     continue
@@ -47,14 +47,14 @@ class AdversarialStabilizationTests(unittest.TestCase):
                     with self.subTest(topology=mask, publication_order=order, subscriptions=subscribed):
                         history = History()
                         for node in reversed(range(4)):
-                            history.add(f"n{node}", 100, dependencies=dag_dependencies(edges, node, 100))
+                            history.add(f"n{node}", 1, dependencies=dag_dependencies(edges, node, 1))
                         cache = HistoryCache(history)
                         manager = DataSubscriptionManager(cache)
                         manager.add_subscriptions(subscribed)
                         manager.get_consistent_cut()
                         for node in order:
                             before = current_cut(manager)
-                            update = history.add(f"n{node}", 9000, dependencies=dag_dependencies(edges, node, 9000))
+                            update = history.add(f"n{node}", 2, dependencies=dag_dependencies(edges, node, 2))
                             result = manager.apply_update(update)
                             after = current_cut(manager)
                             self.assertTrue(history.consistent(after), after)
@@ -66,7 +66,7 @@ class AdversarialStabilizationTests(unittest.TestCase):
                             # nor change any current selection.
                             self.assertEqual(manager.apply_update(update), set())
                             self.assertEqual(current_cut(manager), after)
-                        self.assertEqual({r[1] for r in current_cut(manager).values()}, {9000})
+                        self.assertEqual({r[1] for r in current_cut(manager).values()}, {2})
 
     def test_seeded_membership_histories_in_every_registration_order(self):
         # Randomness is only a deterministic recipe generator. Every seed is
@@ -78,7 +78,7 @@ class AdversarialStabilizationTests(unittest.TestCase):
                 for version in (1, 2, 3, 4):
                     history.add(source, version)
             for root in ("a", "b", "c"):
-                for step, (version, count) in enumerate(((100, 0), (100, 1), (9000, 0), (9000, 1)), 1):
+                for step, (version, count) in enumerate(((1, 0), (1, 1), (2, 0), (2, 1)), 1):
                     dependencies = tuple((source, step) for source in ("x", "y", "z") if rng.randrange(2))
                     history.add(root, version, count, dependencies, weak=(("unavailable-weak", 99),))
             for order in permutations(("a", "b", "c")):
@@ -102,7 +102,7 @@ class AdversarialStabilizationTests(unittest.TestCase):
                             "disconnected": [],
                             "cycle": [(i + 1) % size],
                         }[shape]
-                        history.add(f"n{i}", 100, dependencies=tuple((f"n{j}", 100) for j in targets))
+                        history.add(f"n{i}", 1, dependencies=tuple((f"n{j}", 1) for j in targets))
                     manager = DataSubscriptionManager(HistoryCache(history))
                     manager.add_subscriptions(f"n{i}" for i in range(size))
                     self.assertEqual(len(manager.get_consistent_cut()), size)
@@ -115,18 +115,18 @@ class AdversarialStabilizationTests(unittest.TestCase):
                     history = History()
                     history.add("source", 1)
                     for root in order:
-                        history.add(root, 100, dependencies=(("source", 1),))
+                        history.add(root, 1, dependencies=(("source", 1),))
                     cache = HistoryCache(history)
                     manager = DataSubscriptionManager(cache)
                     manager.add_subscriptions((*order, "source") if subscribe_source else order)
                     manager.get_consistent_cut()
-                    for count, source_version in enumerate((7, 500, 9999), 1):
+                    for count, source_version in enumerate((2, 3, 4), 1):
                         updates = [history.add("source", source_version)]
                         # Publish metadata as it arrives, so a root's current
                         # count advances without changing its dataframe version.
                         for root in (None, *order):
                             update = updates[0] if root is None else history.add(
-                                root, 100, count, dependencies=(("source", source_version),)
+                                root, 1, count, dependencies=(("source", source_version),)
                             )
                             before = current_cut(manager)
                             result = manager.apply_update(update)
@@ -135,7 +135,7 @@ class AdversarialStabilizationTests(unittest.TestCase):
                             self.assertTrue(all(after[key] >= before[key] for key in before))
                             self.assertEqual(result, {after[key][:2] for key in before if after[key][1] > before[key][1]})
                         for root in order:
-                            self.assertEqual(manager._subscriptions[root].current_revision, (root, 100, count))
+                            self.assertEqual(manager._subscriptions[root].current_revision, (root, 1, count))
 
     def test_all_registration_orders_for_every_dag_with_mixed_heads(self):
         # Order changes alone must never turn a sound result into a bad cut.
@@ -143,7 +143,7 @@ class AdversarialStabilizationTests(unittest.TestCase):
         # multiple legitimate cuts with different registration orders.
         for mask in range(64):
             history = dag_history(mask)
-            for versions in product((100, 9000), repeat=4):
+            for versions in product((1, 2), repeat=4):
                 for order in permutations(range(4)):
                     with self.subTest(topology=mask, heads=versions, registration_order=order):
                         manager = DataSubscriptionManager(HistoryCache(history))
@@ -162,14 +162,14 @@ class AdversarialStabilizationTests(unittest.TestCase):
             history = History()
             for version in (1, 2, 3):
                 history.add("source", version)
-            for version, dependency in ((100, 1), (700, 2), (9000, 3)):
+            for version, dependency in ((1, 1), (2, 2), (3, 3)):
                 history.add("a", version, dependencies=(("source", dependency),))
-            history.add("b", 100, dependencies=(("source", 1),))
+            history.add("b", 1, dependencies=(("source", 1),))
             cache = HistoryCache(history)
             manager = DataSubscriptionManager(cache)
             manager.add_subscriptions(("a", "b"))
             for key, sub in manager._subscriptions.items():
-                sub.current_revision = (key, 100, 0)
+                sub.current_revision = (key, 1, 0)
                 sub.current(cache)
             return history, cache, manager
 

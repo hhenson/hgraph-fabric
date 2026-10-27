@@ -134,7 +134,7 @@ class DependencyPublicationReviewTests(unittest.TestCase):
                     self.assertEqual(stream.write("middle", () if remove else (("x", 2),)), set())
                 compare.assert_not_called()
 
-    def test_new_version_links_last_dependency_count_and_cold_cut_uses_it(self):
+    def test_cold_cut_uses_previous_versions_own_revision_head(self):
         for separate, order in product((False, True), permutations(("a", "b"))):
             with self.subTest(separate=separate, order=order):
                 stream = PublishedStream(self, separate)
@@ -145,7 +145,7 @@ class DependencyPublicationReviewTests(unittest.TestCase):
                 stream.write("a", (("x", 3),))
                 stream.write("a", (("x", 3),), version=2)
                 stream.write("b", (("x", 2),), version=1)
-                self.assertEqual(stream.history.records[("a", 2, 0)].previous_revision, (1, 2))
+                self.assertEqual(stream.cache.get_latest_revision(("a", 1)), ("a", 1, 2))
                 # Force storage reads rather than reusing the writer's cached heads.
                 stream.cache = MemoryDataCache()
                 for name in ("latest_values", "revision_values", "data_values"):

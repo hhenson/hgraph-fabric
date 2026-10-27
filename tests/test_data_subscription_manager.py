@@ -25,9 +25,9 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         )
         self.manager = DataSubscriptionManager(self.cache)
 
-    def add_revision(self, data_id, version, count=0, dependencies=None, previous=None):
+    def add_revision(self, data_id, version, count=0, dependencies=None):
         revision_id = (data_id, version, count)
-        self.revisions[revision_id] = DataRevisionDetails(dependencies, None, previous, as_of=AS_OF)
+        self.revisions[revision_id] = DataRevisionDetails(dependencies, None, as_of=AS_OF)
         self.latest[data_id] = max(self.latest.get(data_id, revision_id), revision_id)
         return revision_id
 
@@ -84,7 +84,6 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             for version in range(1, latest_version + 1):
                 self.add_revision(
                     data_id, version, dependencies=(("source", version),),
-                    previous=(version - 1, 0) if version > 1 else None,
                 )
         for order in (["a", "b", "c"], ["c", "b", "a"]):
             with self.subTest(order=order):
@@ -109,24 +108,24 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             self.manager._subscriptions["a"].current_revision, ("a", 5, 0)
         )
 
-    def test_revision_zero_links_to_previous_versions_maximum_revision(self):
+    def test_previous_version_uses_its_own_latest_revision(self):
         self.add_revision("source", 1)
         self.add_revision("source", 2)
         for count in range(8):
-            self.add_revision("a", 1000, count, dependencies=(("source", 1),))
-        self.add_revision("a", 9000, dependencies=(("source", 2),), previous=(1000, 7))
+            self.add_revision("a", 1, count, dependencies=(("source", 1),))
+        self.add_revision("a", 2, dependencies=(("source", 2),))
         self.add_revision("b", 1, dependencies=(("source", 1),))
         self.manager.add_subscriptions(["a", "b"])
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 1000), ("b", 1)})
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 1), ("b", 1)})
         self.assertEqual(
-            self.manager._subscriptions["a"].current_revision, ("a", 1000, 7)
+            self.manager._subscriptions["a"].current_revision, ("a", 1, 7)
         )
-        self.cache.get_revision.assert_any_call(("a", 9000, 0))
-        self.assertNotIn(call(("a", 8999, 0)), self.cache.get_revision.call_args_list)
+        self.cache.get_revision.assert_any_call(("a", 2, 0))
+        self.cache.get_latest_revision.assert_any_call(("a", 1))
 
     def test_leaf_subscription_root_participates_in_overlap(self):
         self.add_revision("source", 1)
-        self.add_revision("source", 2, previous=(1, 0))
+        self.add_revision("source", 2)
         self.add_revision("a", 1, dependencies=(("source", 1),))
         self.manager.add_subscriptions(["source", "a"])
         self.assertEqual(self.manager.get_consistent_cut(), {("source", 1), ("a", 1)})
@@ -137,7 +136,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         self.add_revision("middle", 1, dependencies=(("source", 1),))
         self.add_revision("middle", 2, dependencies=(("source", 2),))
         self.add_revision("a", 1, dependencies=(("middle", 1),))
-        self.add_revision("a", 2, dependencies=(("middle", 2),), previous=(1, 0))
+        self.add_revision("a", 2, dependencies=(("middle", 2),))
         self.add_revision("b", 1, dependencies=(("source", 1),))
         self.manager.add_subscriptions(["a", "b"])
         self.assertEqual(self.manager.get_consistent_cut(), {("a", 1), ("b", 1)})
@@ -159,11 +158,11 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             for version in (1, 2):
                 self.add_revision(data_id, version)
         for count, (x, y) in enumerate(((1, 1), (1, 2), (2, 2))):
-            self.add_revision("a", 100, count, (("x", x), ("y", y)))
-        self.add_revision("b", 100, 0, (("x", 1),))
-        self.add_revision("b", 100, 1, (("x", 2),))
-        self.add_revision("c", 100, 0, (("y", 1),))
-        self.add_revision("d", 100)
+            self.add_revision("a", 1, count, (("x", x), ("y", y)))
+        self.add_revision("b", 1, 0, (("x", 1),))
+        self.add_revision("b", 1, 1, (("x", 2),))
+        self.add_revision("c", 1, 0, (("y", 1),))
+        self.add_revision("d", 1)
         self.manager.add_subscriptions(["a", "b", "c", "d"])
         # a/b initially agree on x=2. Matching a/c rolls a back to x=1,y=1,
         # invalidating a/b; b/c have no overlap and cannot repair that pair.
@@ -171,37 +170,37 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             if right.data_id == "d":
                 for data_id in ("a", "b", "c"):
                     self.assertEqual(
-                        self.manager._subscriptions[data_id].proposed_revision, (data_id, 100, 0)
+                        self.manager._subscriptions[data_id].proposed_revision, (data_id, 1, 0)
                     )
             return find_consistent_cut(left, right, cache, **kwargs)
 
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
             self.assertEqual(
-                self.manager.get_consistent_cut(), {(data_id, 100) for data_id in ("a", "b", "c", "d")}
+                self.manager.get_consistent_cut(), {(data_id, 1) for data_id in ("a", "b", "c", "d")}
             )
         for data_id, subscription in self.manager._subscriptions.items():
-            self.assertEqual(subscription.current_revision, (data_id, 100, 0))
+            self.assertEqual(subscription.current_revision, (data_id, 1, 0))
 
     def test_incoming_item_rollback_rechecks_previously_matching_item(self):
         for data_id in ("x", "y"):
             for version in (1, 2):
                 self.add_revision(data_id, version)
-        self.add_revision("a", 100, 0, (("x", 1),))
-        self.add_revision("a", 100, 1, (("x", 2),))
-        self.add_revision("b", 100, 0, (("y", 1),))
+        self.add_revision("a", 1, 0, (("x", 1),))
+        self.add_revision("a", 1, 1, (("x", 2),))
+        self.add_revision("b", 1, 0, (("y", 1),))
         for count, (x, y) in enumerate(((1, 1), (1, 2), (2, 2))):
-            self.add_revision("c", 100, count, (("x", x), ("y", y)))
+            self.add_revision("c", 1, count, (("x", x), ("y", y)))
         self.manager.add_subscriptions(["a", "b", "c"])
         # a/b form a consistent prefix. Incoming c first matches a on x=2,
         # then b lowers c to x=1,y=1. Rechecking a/c must now lower a too.
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 100), ("b", 100), ("c", 100)})
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 1), ("b", 1), ("c", 1)})
         for data_id, subscription in self.manager._subscriptions.items():
-            self.assertEqual(subscription.current_revision, (data_id, 100, 0))
+            self.assertEqual(subscription.current_revision, (data_id, 1, 0))
 
     def test_matching_prefix_checks_each_pair_once(self):
         self.add_revision("source", 1)
         for data_id in ("a", "b", "c", "d"):
-            self.add_revision(data_id, 100, dependencies=(("source", 1),))
+            self.add_revision(data_id, 1, dependencies=(("source", 1),))
         self.manager.add_subscriptions(["a", "b", "c", "d"])
         with patch(
             "hgraph_fabric.data_subscription_manager.find_consistent_cut", wraps=find_consistent_cut
@@ -215,7 +214,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
     def test_initialization_uses_proposals_and_keeps_current_until_commit(self):
         self.add_revision("source", 1)
         for data_id in ("a", "b", "c"):
-            self.add_revision(data_id, 100, dependencies=(("source", 1),))
+            self.add_revision(data_id, 1, dependencies=(("source", 1),))
         self.manager.add_subscriptions(["a", "b", "c"])
         for subscription in self.manager._subscriptions.values():
             subscription.current_revision = (subscription.data_id, 1, 0)
@@ -227,32 +226,32 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             return find_consistent_cut(left, right, cache, **kwargs)
 
         with patch("hgraph_fabric.data_subscription_manager.find_consistent_cut", side_effect=compare):
-            self.assertEqual(self.manager.get_consistent_cut(), {("a", 100), ("b", 100), ("c", 100)})
+            self.assertEqual(self.manager.get_consistent_cut(), {("a", 1), ("b", 1), ("c", 1)})
 
     def test_single_subscription_is_reset_to_latest(self):
-        self.add_revision("a", 100)
+        self.add_revision("a", 1)
         subscription = self.manager.add_subscription("a")
         subscription.current_revision = ("a", 1, 0)
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 100)})
-        self.assertEqual(subscription.current_revision, ("a", 100, 0))
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 1)})
+        self.assertEqual(subscription.current_revision, ("a", 1, 0))
 
     def test_failed_later_comparison_restores_pre_tournament_selections(self):
         for version in (1, 2):
             self.add_revision("x", version)
-        self.add_revision("a", 100, 0, (("x", 1),))
-        self.add_revision("a", 100, 1, (("x", 2),))
-        self.add_revision("b", 100, dependencies=(("x", 1),))
-        self.add_revision("c", 100)
+        self.add_revision("a", 1, 0, (("x", 1),))
+        self.add_revision("a", 1, 1, (("x", 2),))
+        self.add_revision("b", 1, dependencies=(("x", 1),))
+        self.add_revision("c", 1)
         self.manager.add_subscriptions(["a", "b", "c"])
         a = self.manager._subscriptions["a"]
-        a.current_revision = ("a", 100, 1)
+        a.current_revision = ("a", 1, 1)
         previous = {key: sub.current_revision for key, sub in self.manager._subscriptions.items()}
 
         def compare(left, right, cache, **kwargs):
             if right.data_id == "c":
-                self.assertEqual(a.proposed_revision, ("a", 100, 1))
+                self.assertEqual(a.proposed_revision, ("a", 1, 1))
                 self.assertEqual(self.manager._subscriptions["b"].proposed_revision, ("b", 0, 0))
-                self.assertEqual(a.current_revision, ("a", 100, 1))
+                self.assertEqual(a.current_revision, ("a", 1, 1))
                 raise OSError("Unavailable history")
             return find_consistent_cut(left, right, cache, **kwargs)
 
@@ -263,57 +262,54 @@ class DataSubscriptionManagerTests(unittest.TestCase):
             {key: sub.current_revision for key, sub in self.manager._subscriptions.items()}, previous
         )
 
-    def test_rejects_history_that_does_not_move_to_an_older_version(self):
+    def test_missing_preceding_version_is_an_error(self):
         self.add_revision("source", 1)
         self.add_revision("source", 2)
-        self.add_revision("a", 2, dependencies=(("source", 2),), previous=(2, 0))
+        self.add_revision("a", 2, dependencies=(("source", 2),))
         self.add_revision("b", 1, dependencies=(("source", 1),))
         self.manager.add_subscriptions(["a", "b"])
-        with self.assertRaises(ValueError):
+        with self.assertRaises(KeyError):
             self.manager.get_consistent_cut()
         for subscription in self.manager._subscriptions.values():
             self.assertIsNone(subscription.current_revision)
 
-    def test_exact_match_beats_newer_absent_dependency_across_version_gaps(self):
+    def test_exact_match_beats_newer_absent_dependency_across_versions(self):
         for version in (1, 2, 4):
             self.add_revision("source", version)
-        self.add_revision("a", 100, dependencies=(("source", 1),))
-        self.add_revision("a", 500, dependencies=(("source", 2),), previous=(100, 0))
-        self.add_revision("a", 900, previous=(500, 0))
-        self.add_revision("a", 1200, dependencies=(("source", 4),), previous=(900, 0))
+        self.add_revision("a", 1, dependencies=(("source", 1),))
+        self.add_revision("a", 2, dependencies=(("source", 2),))
+        self.add_revision("a", 3)
+        self.add_revision("a", 4, dependencies=(("source", 4),))
         self.add_revision("b", 1, dependencies=(("source", 2),))
         self.manager.add_subscriptions(["a", "b"])
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 500), ("b", 1)})
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 2), ("b", 1)})
 
     def test_newest_absence_wins_when_dependency_version_has_no_match(self):
         for version in (1, 2, 4):
             self.add_revision("source", version)
-        self.add_revision("a", 100, dependencies=(("source", 1),))
-        self.add_revision("a", 500, previous=(100, 0))
-        self.add_revision("a", 900, previous=(500, 0))
-        self.add_revision("a", 1200, dependencies=(("source", 4),), previous=(900, 0))
+        self.add_revision("a", 1, dependencies=(("source", 1),))
+        self.add_revision("a", 2)
+        self.add_revision("a", 3)
+        self.add_revision("a", 4, dependencies=(("source", 4),))
         self.add_revision("b", 1, dependencies=(("source", 2),))
         self.manager.add_subscriptions(["a", "b"])
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 900), ("b", 1)})
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 3), ("b", 1)})
 
     def test_absent_midpoint_does_not_hide_matches_on_either_side(self):
         for dependencies, expected in (
-            ([None, 2, None, 4, None, 5], 200),
-            ([None, 1, None, 2, None, 5], 400),
-            ([None, 2, None, 2, None, 5], 400),
+            ([None, 2, None, 4, None, 5], 2),
+            ([None, 1, None, 2, None, 5], 4),
+            ([None, 2, None, 2, None, 5], 4),
         ):
             with self.subTest(dependencies=dependencies):
                 self.setUp()
                 for version in (1, 2, 4, 5):
                     self.add_revision("source", version)
-                previous = None
                 for i, dependency in enumerate(dependencies, 1):
                     self.add_revision(
-                        "a", i * 100,
+                        "a", i,
                         dependencies=((("source", dependency),) if dependency else None),
-                        previous=previous,
                     )
-                    previous = (i * 100, 0)
                 self.add_revision("b", 1, dependencies=(("source", 2),))
                 self.manager.add_subscriptions(["a", "b"])
                 self.assertEqual(
@@ -323,27 +319,27 @@ class DataSubscriptionManagerTests(unittest.TestCase):
     def test_history_search_probes_zero_and_selects_newest_exact_match(self):
         for count in range(128):
             self.add_revision("source", count + 1)
-            self.add_revision("a", 9000, count, dependencies=(("source", count + 1),))
+            self.add_revision("a", 2, count, dependencies=(("source", count + 1),))
         self.add_revision("b", 1, dependencies=(("source", 20),))
         self.manager.add_subscriptions(["a", "b"])
         self.cache.reset_mock()
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 9000), ("b", 1)})
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 2), ("b", 1)})
         self.assertEqual(
-            self.manager._subscriptions["a"].current_revision, ("a", 9000, 19)
+            self.manager._subscriptions["a"].current_revision, ("a", 2, 19)
         )
         root_loads = [
             args[0] for args, _ in self.cache.get_revision.call_args_list
             if args[0][0] == "a"
         ]
-        self.assertEqual(list(dict.fromkeys(root_loads))[:2], [("a", 9000, 127), ("a", 9000, 0)])
+        self.assertEqual(list(dict.fromkeys(root_loads))[:2], [("a", 2, 127), ("a", 2, 0)])
 
     def test_absence_is_fallback_when_exact_match_cannot_form_a_cut(self):
         for data_id, versions in (("x", (2, 3)), ("y", (1, 2))):
             for version in versions:
                 self.add_revision(data_id, version)
-        self.add_revision("a", 10, dependencies=(("x", 2), ("y", 2)))
-        self.add_revision("a", 20, previous=(10, 0))
-        self.add_revision("a", 30, dependencies=(("x", 3),), previous=(20, 0))
+        self.add_revision("a", 1, dependencies=(("x", 2), ("y", 2)))
+        self.add_revision("a", 2)
+        self.add_revision("a", 3, dependencies=(("x", 3),))
         self.add_revision("b", 1, dependencies=(("x", 2), ("y", 1)))
         self.manager.add_subscriptions(["a", "b"])
-        self.assertEqual(self.manager.get_consistent_cut(), {("a", 20), ("b", 1)})
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 2), ("b", 1)})

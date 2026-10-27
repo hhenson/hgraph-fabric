@@ -149,11 +149,11 @@ reads the records; this does not claim logarithmic storage reads. Changing
 membership or unordered records retain the general newest-first search.
 Descendant expansions through latest revisions are not used as ordering keys.
 When the search reaches a subscribed root, it uses the same count bounds and
-follows revision-zero links to previous data versions. During updates, the
+steps directly to preceding data versions (`v - 1`). During updates, the
 committed root remains the lower bound; rejected proposals leave current intact.
 
 Only after intermediate resolution fails does root history search follow
-revision-zero links and the preceding version's own revision head. Exact
+consecutive version numbers and each version's own revision head. Exact
 alignments take precedence over consistent omissions; both sides' intermediate choices may need to change.
 Every shared data version must agree, including upstream nodes when one root
 occurs in the other graph. Once that containment is coherent, it counts as an
@@ -165,9 +165,10 @@ exhaustive search; no globally newest cut or logarithmic overall cost is claimed
 The cache's `latest(data_id)` returns a revision ID, combining the dataset's
 latest version with that version's latest revision. `get_latest_revision(version_id)`
 loads the head for that exact version, including revisions published after a
-successor version. Revision-zero `previous_revision` links retain the preceding
-version and its count observed at publication time; that count is a snapshot,
-not a final bound. `None` marks the first version.
+successor version. Revision records contain no predecessor link: versions are
+consecutive, starting at 1. Search tests the top candidate first, probes revision
+zero when a bound is needed, and obtains older versions' upper revision counts
+from their own heads. The first version is the end of stored history.
 
 Notifications for an ID whose head has not been loaded are retained as hints.
 The first `latest` lookup combines those hints with the stored head, so an older

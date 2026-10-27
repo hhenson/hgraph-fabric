@@ -112,7 +112,7 @@ class DataFabricSessionTests(unittest.TestCase):
         _, update = publish(self.session, "a", 100)
         sub = self.session.add_subscription("a")
         self.session.get_consistent_cut()
-        revision = replace(update, revision=(1, 1), previous_revision=None)
+        revision = replace(update, revision=(1, 1))
         with patch.object(self.cache, "get_version", side_effect=AssertionError("No new table")):
             self.assertEqual(self.session.apply_update(revision), {})
             self.assertEqual(self.session.apply_update(revision), {})
@@ -314,7 +314,7 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         _, initial = publish(publisher, "a", 100)
         self.session.add_subscription("a")
         self.session.get_consistent_cut()
-        revision = replace(initial, revision=(1, 1), previous_revision=None)
+        revision = replace(initial, revision=(1, 1))
         data, update = publish(publisher, "a", 200)
         self.transport.poll.side_effect = [revision, update]
         result = self.session.poll()

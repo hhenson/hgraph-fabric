@@ -32,14 +32,9 @@ def is_no_data(revision: DataRevisionId) -> bool:
 
 @dataclass(frozen=True)
 class DataRevisionDetails:
-    """
-    The previous_revision is set when the details are stored at revision 0.
-    It records the preceding version and its revision at publication time.
-    That count is a snapshot, not a final count: older versions remain revisable.
-    """
+    """Immediate accepted inputs and timestamp for one immutable revision."""
     dependencies: tuple[DataVersionId, ...] | None
     weak_dependencies: tuple[DataVersionId, ...] | None
-    previous_revision: DataRevision | None
     as_of: datetime
 
 
