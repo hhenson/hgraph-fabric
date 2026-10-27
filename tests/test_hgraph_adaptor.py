@@ -453,11 +453,11 @@ class HgraphAdaptorTests(unittest.TestCase):
         writing, release = Event(), Event()
         original = self.cache.write_version
         graph_progress = []
-        def slow_write(version, data):
+        def slow_write(version, data, details):
             writing.set()
             if not release.wait(2):
                 raise TimeoutError("graph blocked on storage")
-            original(version, data)
+            original(version, data, details)
         @hg.sink_node
         def unblock(tick: hg.TS[bool]):
             if writing.is_set():

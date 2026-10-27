@@ -35,15 +35,20 @@ class MemoryDataCache(DataCache):
         self.loads.append(("revision", revision_id))
         return self.revision_values[revision_id]
 
-    def reserve_write(self, data_id, previous):
-        if self.latest_values.get(data_id) != previous:
-            raise RuntimeError("Publication head changed")
+    def load_latest_revision(self, version_id):
+        self.loads.append(("latest_revision", version_id))
+        candidates = [r for r in self.revision_values if r[:2] == version_id]
+        candidates += [r for r in self.latest_values.values() if r[:2] == version_id]
+        if not candidates:
+            raise KeyError(version_id)
+        return max(candidates)
 
-    def write_version(self, version_id, data):
-        self.writes.append(("version", version_id, data))
+    def write_version(self, version_id, data, details):
+        self.writes.append(("version", version_id, data, details))
         if version_id in self.data_values:
             raise FileExistsError(version_id)
         self.data_values[version_id] = data
+        self.revision_values[(*version_id, 0)] = details
 
     def write_revision(self, revision_id, details):
         self.writes.append(("revision", revision_id, details))
@@ -51,11 +56,14 @@ class MemoryDataCache(DataCache):
             raise FileExistsError(revision_id)
         self.revision_values[revision_id] = details
 
-    def write_latest(self, data_id, details, previous):
-        self.writes.append(("latest", data_id, details))
-        if self.latest_values.get(data_id) != previous:
-            raise RuntimeError("Publication head changed")
-        self.latest_values[data_id] = (data_id, *details.revision)
+    def write_latest_version(self, version_id):
+        self.writes.append(("latest_version", version_id))
+        revision = max(r for r in self.revision_values if r[:2] == version_id)
+        self.latest_values[version_id[0]] = max(self.latest_values.get(version_id[0], revision), revision)
+
+    def write_latest_revision(self, revision_id):
+        self.writes.append(("latest_revision", revision_id))
+        self.latest_values[revision_id[0]] = max(self.latest_values.get(revision_id[0], revision_id), revision_id)
 
 
 class DataCacheTests(unittest.TestCase):
@@ -104,6 +112,7 @@ class DataCacheTests(unittest.TestCase):
 
     def test_peeking_version_latest_does_not_resolve_cached_history(self):
         self.cache.latest_values["prices"] = ("prices", 3, 8)
+        self.cache.revision_values[("prices", 1, 4)] = DataRevisionDetails(None, None, None, as_of=AS_OF)
         self.cache.revision_values[("prices", 3, 0)] = DataRevisionDetails(None, None, (1, 4), as_of=AS_OF)
         self.cache.latest("prices")
         self.cache.get_revision(("prices", 3, 0))
@@ -185,7 +194,7 @@ class DataCacheTests(unittest.TestCase):
                 self.cache.get_revision(revision_id).weak_dependencies,
                 update.weak_dependencies,
             )
-        self.assertEqual(self.cache.loads, [("latest", "prices")])
+        self.assertEqual(self.cache.loads, [("latest_revision", ("prices", 1)), ("latest", "prices")])
 
     def test_updates_with_equal_revision_pairs_keep_data_ids_separate(self):
         for data_id, dependency in (("prices", "source"), ("quotes", "reference")):
@@ -263,15 +272,16 @@ class DataCacheTests(unittest.TestCase):
             ("prices", 2, 0): DataRevisionDetails(None, None, (1, 3), as_of=AS_OF),
         })
         for version, revision in ((3, 8), (2, 5), (1, 3)):
+            self.cache.revision_values[("prices", version, revision)] = DataRevisionDetails(None, None, None, as_of=AS_OF)
             for _ in range(2):
                 self.assertEqual(
                     self.cache.get_latest_revision(("prices", version)),
                     ("prices", version, revision),
                 )
         self.assertEqual(self.cache.loads, [
-            ("latest", "prices"),
-            ("revision", ("prices", 3, 0)),
-            ("revision", ("prices", 2, 0)),
+            ("latest_revision", ("prices", 3)),
+            ("latest_revision", ("prices", 2)),
+            ("latest_revision", ("prices", 1)),
         ])
         self.cache.apply_update(DataUpdateDetails(
             id="prices",
@@ -297,18 +307,15 @@ class DataCacheTests(unittest.TestCase):
                 self.assertEqual(error.exception.args, (("prices", version),))
                 self.assertNotIn(("prices", version), self.cache._latest_revisions)
 
-    def test_version_lookup_can_retry_a_missing_header(self):
-        self.cache.latest_values["prices"] = ("prices", 2, 5)
+    def test_version_lookup_can_retry_an_unpublished_version(self):
         with self.assertRaises(KeyError):
-            self.cache.get_latest_revision(("prices", 1))
-        self.assertNotIn(("prices", 1), self.cache._latest_revisions)
-        self.cache.revision_values[("prices", 2, 0)] = DataRevisionDetails(
-            None, None, (1, 3), as_of=AS_OF
-        )
-        self.assertEqual(self.cache.get_latest_revision(("prices", 1)), ("prices", 1, 3))
-        self.assertEqual(self.cache.loads.count(("revision", ("prices", 2, 0))), 2)
+            self.cache.get_latest_revision(("prices", 2))
+        self.assertNotIn(("prices", 2), self.cache._latest_revisions)
+        self.cache.revision_values[("prices", 2, 0)] = DataRevisionDetails(None, None, (1, 1), as_of=AS_OF)
+        self.assertEqual(self.cache.get_latest_revision(("prices", 2)), ("prices", 2, 0))
+        self.assertEqual(self.cache.loads.count(("latest_revision", ("prices", 2))), 2)
 
-    def test_version_lookup_rejects_cycles(self):
+    def test_version_history_rejects_cycles(self):
         for previous in ((2, 4), (3, 6)):
             with self.subTest(previous=previous):
                 cache = MemoryDataCache()
@@ -320,10 +327,10 @@ class DataCacheTests(unittest.TestCase):
                     None, None, (2, 5), as_of=AS_OF
                 )
                 with self.assertRaises(ValueError):
-                    cache.get_latest_revision(("prices", 1))
+                    list(cache.version_history("prices"))
                 self.assertNotIn(("prices", 1), cache._latest_revisions)
 
-    def test_dependency_expansion_uses_historical_version_header(self):
+    def test_dependency_expansion_loads_the_specific_version_head(self):
         self.cache.latest_values.update({"source": ("source", 2, 8), "leaf": ("leaf", 7, 4)})
         self.cache.revision_values.update({
             ("prices", 1, 1): DataRevisionDetails((("source", 1),), None, None, as_of=AS_OF),
@@ -336,8 +343,19 @@ class DataCacheTests(unittest.TestCase):
             (("prices", 1), ("source", 1)),
             (("source", 1), ("leaf", 7)),
         })
-        self.assertIn(("revision", ("source", 2, 0)), self.cache.loads)
+        self.assertIn(("latest_revision", ("source", 1)), self.cache.loads)
+        self.assertNotIn(("revision", ("source", 2, 0)), self.cache.loads)
         self.assertNotIn(("revision", ("source", 2, 8)), self.cache.loads)
+
+    def test_revision_head_advances_without_loading_dataset_head(self):
+        self.assertEqual(self.cache.get_latest_revision(("prices", 1)), ("prices", 1, 1))
+        self.assertIsNone(self.cache.peek_latest("prices"))
+        update = DataUpdateDetails(id="prices", revision=(1, 2), previous_revision=None,
+                                   dependencies=(), weak_dependencies=(), as_of=AS_OF)
+        self.cache.apply_update(update)
+        self.assertEqual(self.cache.get_latest_revision(("prices", 1)), ("prices", 1, 2))
+        self.assertIsNone(self.cache.peek_latest("prices"))
+        self.assertEqual(self.cache.latest("prices"), ("prices", 1, 2))
 
     def test_cache_instances_are_independent(self):
         other = MemoryDataCache()

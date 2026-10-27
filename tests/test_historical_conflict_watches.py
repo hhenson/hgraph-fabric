@@ -84,7 +84,7 @@ class HistoricalConflictWatchTests(unittest.TestCase):
         retry.assert_not_called()
         self.assertEqual(reader.cut(), before)
 
-    def test_delayed_final_revision_keeps_watch_after_successor_notification(self):
+    def test_delayed_revision_keeps_watch_after_successor_notification(self):
         _, _, middle, _, reader = waiting_reader()
         queued = []
         with patch.object(reader.session, 'apply_update', side_effect=queued.append):
@@ -92,18 +92,23 @@ class HistoricalConflictWatchTests(unittest.TestCase):
             middle.publish('m', 200)
         self.assertEqual([update.revision for update in queued], [(1, 1), (2, 0)])
         self.assertEqual(reader.session.apply_update(queued[1]), {})
-        # The new version's header says M@1 finished at r1, but this cache
+        # The new version's header captured M@1/r1, but this cache
         # has only observed r0. The older notification can still unblock it.
         changes = reader.session.apply_update(queued[0])
         self.assertEqual(set(changes), {'a', 'c'})
         self.assertEqual(reader.cut(), {'a': ('a', 2, 0), 'c': ('c', 2, 0), 'b': ('b', 1, 0)})
 
-    def test_fully_observed_sealed_version_does_not_keep_a_historical_watch(self):
+    def test_old_version_remains_watched_and_can_unblock_after_successor(self):
         _, _, middle, _, reader = waiting_reader()
-        middle.publish('m', 200)  # M@1 remains at r0 permanently.
+        middle.publish('m', 200)
         manager = reader.session._subscriptions
-        self.assertNotIn(('m', 1), manager._conflicts)
-        self.assertTrue(all(('m', 1) not in versions for versions in manager._historical_conflicts.values()))
+        self.assertIn(('m', 1), manager._conflicts)
+        self.assertTrue(any(('m', 1) in versions for versions in manager._historical_conflicts.values()))
+        middle.publish('m', version=1)
+        self.assertEqual(reader.cut(), {'a': ('a', 2, 0), 'c': ('c', 2, 0), 'b': ('b', 1, 0)})
+        self.assertEqual(reader.cache.latest('m'), ('m', 2, 0))
+        self.assertEqual(reader.cache.get_latest_revision(('m', 1)), ('m', 1, 1))
+        self.assertEqual(manager._historical_conflicts, {})
 
     def test_blocked_retry_ignores_duplicates_but_wakes_on_the_next_revision(self):
         world, _, middle, _, reader = waiting_reader(target=3)
@@ -127,7 +132,7 @@ class HistoricalConflictWatchTests(unittest.TestCase):
         self.assertEqual(reader.cut(), {'a': ('a', 2, 0), 'c': ('c', 2, 0), 'b': ('b', 1, 0)})
         self.assertEqual(reader.nodes()['x'], 3)
 
-    def test_dependency_removal_uses_watch_count_before_retiring_final_revision(self):
+    def test_dependency_removal_uses_watch_count_before_retiring_resolved_paths(self):
         world, _, _, _, reader = waiting_reader()
         publisher = world.process('m without dependencies')
         queued = []
@@ -142,9 +147,8 @@ class HistoricalConflictWatchTests(unittest.TestCase):
         observed = []
 
         def check_before_retirement(sub):
-            # At this point the cache holds the final count. Cleaning watches
-            # now would remove both historical owners and wrongly close the gate.
-            self.assertFalse(manager._revision_may_advance(('m', 1), ('m', 1, 1)))
+            # Eligibility was captured before the new revision removed the
+            # dependency. Retire paths only after the retry has run.
             observed.append(sub.data_id)
             return retry(sub)
 

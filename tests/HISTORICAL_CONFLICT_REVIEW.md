@@ -60,26 +60,26 @@ does not acquire a soft watch merely because of this conflict.
 
 ## Retirement and regression coverage
 
-Root candidates below current are retired. A cached successor's revision-zero
-link also proves the final revision count of its predecessor version. Once that
-count has been observed, a historical watch for that version can retire. If the
-final notification is delayed, its watch remains until that count arrives.
-Duplicate or older notifications do not retry an unchanged historical watch.
+Root candidates below current and caught-up waiters are retired. A successor's
+revision-zero link records a predecessor snapshot, not its final count. Older
+versions remain revisable, so publishing a successor does not retire a still
+admissible historical watch. Duplicate or older notifications do not retry an
+unchanged historical watch.
 
 Eligibility uses the dependent subscriptions recorded before processing the
 notification. Resolution uses the updated records; watch retirement follows
 the attempt. The baseline already copied current/latest dependents before
 refreshing indexes. The fix makes that ordering explicit for historical path
-owners too. A regression delivers a successor before the predecessor's final
+owners too. A regression delivers a successor before the predecessor's delayed
 revision that removes its dependencies: both historical owners must count for
-that final notification, even though their watches can retire immediately
+that notification, even though their watches can retire immediately
 afterwards. Another regression removes both paths to X through N; eligibility
 uses the watched consumer N, not the post-update count at the endpoint X.
 
 `test_historical_conflict_watches.py` covers all six registration orders,
 data-version and revision-count advances, M catching up or removing its inputs,
-historical paths omitted by both endpoint trees, retirement, delayed final
-notifications, pre-update eligibility when dependencies disappear, and repeated
+historical paths omitted by both endpoint trees, retirement, delayed
+notifications and new revisions after a successor, pre-update eligibility when dependencies disappear, and repeated
 blocked attempts. The shared-cache transition oracle also validates historical
 watch reachability against raw records.
 

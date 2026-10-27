@@ -16,6 +16,7 @@ class DataCacheHistoryTests(unittest.TestCase):
         self.cache.latest_values["prices"] = ("prices", 3, 7)
         self.cache.revision_values.update({
             ("prices", 3, 0): DataRevisionDetails((), (), (2, 23), as_of=AS_OF),
+            ("prices", 2, 23): DataRevisionDetails((), (), None, as_of=AS_OF),
             ("prices", 2, 0): DataRevisionDetails((), (), (1, 0), as_of=AS_OF),
             ("prices", 1, 0): DataRevisionDetails((), (), None, as_of=AS_OF),
         })
@@ -37,17 +38,18 @@ class DataCacheHistoryTests(unittest.TestCase):
         self.assertEqual(self.cache.loads, [])
         self.assertEqual(self.cache.writes, [])
 
-    def test_loading_history_is_lazy_and_follows_version_headers_with_final_counts(self):
+    def test_loading_history_resolves_each_versions_head_lazily(self):
         history = self.cache.version_history("prices")
         self.assertEqual(self.cache.loads, [])
         self.assertEqual(next(history), self.expected[0])
         self.assertEqual(self.cache.loads, [("latest", "prices")])
         self.assertEqual(next(history), self.expected[1])
-        self.assertEqual(self.cache.loads[-1], ("revision", ("prices", 3, 0)))
+        self.assertEqual(self.cache.loads[-1], ("latest_revision", ("prices", 2)))
         self.assertEqual(list(history), self.expected[2:])
         self.assertEqual(self.cache.loads, [
             ("latest", "prices"), ("revision", ("prices", 3, 0)),
-            ("revision", ("prices", 2, 0)), ("revision", ("prices", 1, 0)),
+            ("latest_revision", ("prices", 2)), ("revision", ("prices", 2, 0)),
+            ("latest_revision", ("prices", 1)), ("revision", ("prices", 1, 0)),
         ])
         self.cache.loads.clear()
         self.assertEqual(list(self.cache.version_history("prices")), self.expected)
@@ -67,11 +69,17 @@ class DataCacheHistoryTests(unittest.TestCase):
         self.assertEqual(self.cache.loads, [])
         self.cache.get_revision(("prices", 3, 0))
         self.cache.loads.clear()
-        # A previous-version pointer includes the maximum count. Yield its ID
-        # even if that version's header is not yet available to continue walking.
+        # The predecessor snapshot alone cannot establish its current head.
+        self.assertEqual(list(self.cache.peek_version_history("prices")), self.expected[:1])
+        self.assertEqual(self.cache.loads, [])
+        self.cache.get_latest_revision(("prices", 2))
+        self.cache.loads.clear()
+        self.assertEqual(list(self.cache.peek_version_history("prices")), self.expected[:2])
+        self.assertEqual(self.cache.loads, [])
+        self.cache.get_latest_revision(("prices", 1))
+        self.cache.loads.clear()
         self.assertEqual(list(self.cache.peek_version_history("prices")), self.expected)
         self.assertIsNone(self.cache.peek_revision(("prices", 1, 0)))
-        self.assertIsNone(self.cache.peek_latest_revision(("prices", 1)))
         self.assertEqual(self.cache.loads, [])
         self.assertEqual(self.cache.writes, [])
 

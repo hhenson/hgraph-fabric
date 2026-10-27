@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 from pyarrow import table
 
-from hgraph_fabric.data_structures import DataRevisionDetails, DataUpdateDetails, LatestDataDetails
+from hgraph_fabric.data_structures import DataRevisionDetails, DataUpdateDetails
 from hgraph_fabric.data_subscription_manager import DataSubscriptionManager
 from test_data_cache import MemoryDataCache
 
@@ -64,11 +64,10 @@ class DataCacheWriteTests(unittest.TestCase):
                                      dependencies=(), weak_dependencies=(), as_of=as_of)
         self.assertEqual(update, expected)
         self.assertEqual([entry[:2] for entry in cache.writes], [
-            ("version", ("prices", 1)), ("revision", ("prices", 1, 0)), ("latest", "prices"),
+            ("version", ("prices", 1)), ("latest_revision", ("prices", 1, 0)), ("latest_version", ("prices", 1)),
         ])
         self.assertIs(cache.writes[0][2], written)
-        self.assertEqual(cache.writes[1][2], DataRevisionDetails((), (), None, as_of=as_of))
-        self.assertEqual(cache.writes[2][2], LatestDataDetails((1, 0)))
+        self.assertEqual(cache.writes[0][3], DataRevisionDetails((), (), None, as_of=as_of))
         cache.loads.clear()
         self.assertIs(cache.get_version(("prices", 1)), written)
         self.assertEqual(cache.latest("prices"), ("prices", 1, 0))
@@ -187,10 +186,11 @@ class DataCacheWriteTests(unittest.TestCase):
                 self.assertEqual(cache.writes, [])
 
     def test_storage_failures_propagate_without_advancing_cached_latest(self):
-        for failed in ("write_version", "write_revision", "write_latest"):
+        for failed in ("write_version", "write_latest_revision", "write_latest_version"):
             with self.subTest(failed=failed):
                 cache = MemoryDataCache()
                 cache.latest_values["prices"] = ("prices", 1000, 17)
+                cache.latest("prices")
                 as_of = datetime(1970, 1, 1, 0, 0, 2, tzinfo=UTC)
                 with patch.object(cache, failed, side_effect=OSError("Storage unavailable")):
                     with self.assertRaises(OSError):
@@ -253,7 +253,7 @@ class DataCacheWriteTests(unittest.TestCase):
             self.assertEqual(update.as_of, as_of)
             self.assertEqual((update.dependencies, update.weak_dependencies), (deps, weak))
             self.assertEqual([entry[:2] for entry in cache.writes], [
-                ("revision", ("prices", 2, count)), ("latest", "prices"),
+                ("revision", ("prices", 2, count)), ("latest_revision", ("prices", 2, count)),
             ])
             self.assertEqual(cache.get_latest_revision(("prices", 2)), ("prices", 2, count))
         self.assertIs(cache.get_revision(("prices", 2, 0)), header)
@@ -289,7 +289,7 @@ class DataCacheWriteTests(unittest.TestCase):
         self.assertEqual(cache.writes, [])
 
     def test_failed_dependency_persistence_does_not_advance_cached_head(self):
-        for failed in ("write_revision", "write_latest"):
+        for failed in ("write_revision", "write_latest_revision"):
             with self.subTest(failed=failed):
                 cache = MemoryDataCache()
                 _, initial = cache.write(table({"price": [10]}), id="prices")

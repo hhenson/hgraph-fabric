@@ -1,5 +1,8 @@
 """The same persistence contract for memory, filesystem and opt-in S3 stores."""
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from datetime import datetime, timedelta, timezone
+import json
 import os
 from tempfile import TemporaryDirectory
 import unittest
@@ -43,7 +46,7 @@ class StorageContract:
         with patch("obstore.get", wraps=obstore.get) as get:
             loaded = reader.get_version(("prices", 1))
             self.assertIs(reader.get_version(("prices", 1)), loaded)
-        self.assertEqual(get.call_count, 1)
+        self.assertEqual(get.call_count, 2)  # Descriptor, then Arrow payload.
         self.assertTrue(loaded.equals(written, check_metadata=True))
         self.assertEqual(reader.get_revision(("prices", 1, 0)).as_of, update.as_of)
 
@@ -63,7 +66,10 @@ class StorageContract:
         for count, deps in enumerate((None, (), (("source.a", 7), ("b", 99)))):
             with self.subTest(deps=deps):
                 details = DataRevisionDetails(deps, deps, (7, 4) if count == 0 else None, AS_OF)
-                self.cache().write_revision(("prices", 1, count), details)
+                if count == 0:
+                    self.cache().write_version(("prices", 1), pa.table({"x": [1]}), details)
+                else:
+                    self.cache().write_revision(("prices", 1, count), details)
                 self.assertEqual(self.cache().get_revision(("prices", 1, count)), details)
 
     def test_contiguous_history_and_dependency_only_revisions_survive_restart(self):
@@ -71,7 +77,7 @@ class StorageContract:
         original, _ = self.publish(writer)
         with patch("obstore.put", wraps=obstore.put) as put:
             writer.write_dependencies("prices", (("source", 7),), (("weak", 8),), AS_OF)
-        self.assertEqual(put.call_count, 3)  # Claim + revision + head; no Arrow rewrite.
+        self.assertEqual(put.call_count, 2)  # Revision + per-version hint; no Arrow rewrite.
         with patch("obstore.put", wraps=obstore.put) as put:
             writer.write_dependencies("prices", (("source", 7),), (("weak", 8),), AS_OF + timedelta(days=1))
         put.assert_not_called()
@@ -103,11 +109,12 @@ class StorageContract:
             id="prices.close", as_of=AS_OF,
         )
         paths = {item["path"] for item in obstore.list(self.store()).collect()}
+        prefix = "market-data/equities/us/prices.close"
+        payload = next(path for path in paths if path.endswith(".arrow"))
+        self.assertRegex(payload, rf"{prefix}/versions/1/[0-9a-f]{{32}}\.arrow")
         self.assertEqual(paths, {
-            "market-data/equities/us/prices.close/versions/1.arrow",
-            "market-data/equities/us/prices.close/revisions/1/0.json",
-            "market-data/equities/us/prices.close/latest.json",
-            "market-data/equities/us/prices.close/publications/initial.json",
+            payload, f"{prefix}/revisions/1/0.json",
+            f"{prefix}/revisions/1/latest.json", f"{prefix}/latest_version.json",
         })
 
     def test_invalid_names_are_rejected_before_storage_access(self):
@@ -159,7 +166,7 @@ class StorageContract:
                     self.assertEqual(
                         {item["path"] for item in obstore.list(self.store()).collect()}, before,
                     )
-                    # Invalid input must not consume a publication claim or version.
+                    # Invalid input must not consume a version.
                     _, update = self.publish(writer, 200, **{field: (("source.a", 7),)})
                     self.assertEqual(update.revision, (2 if existing else 1, 0))
                     self.assertEqual(self.cache(namespace).latest("prices"), ("prices", 2 if existing else 1, 0))
@@ -183,30 +190,46 @@ class StorageContract:
         original, _ = self.publish(writer)
         original_details = writer.get_revision(("prices", 1, 0))
         with self.assertRaises(obstore.exceptions.AlreadyExistsError):
-            self.cache().write_version(("prices", 1), pa.table({"price": [999]}))
+            self.cache().write_version(("prices", 1), pa.table({"price": [999]}), original_details)
+        writer.write_dependencies("prices", (("source", 1),))
         with self.assertRaises(obstore.exceptions.AlreadyExistsError):
-            self.cache().write_revision(("prices", 1, 0), DataRevisionDetails(None, None, None, AS_OF))
+            self.cache().write_revision(("prices", 1, 1), DataRevisionDetails(None, None, None, AS_OF))
         self.assertTrue(self.cache().get_version(("prices", 1)).equals(original, check_metadata=True))
         self.assertEqual(self.cache().get_revision(("prices", 1, 0)), original_details)
 
     def test_failed_revision_write_does_not_publish_a_new_head(self):
         writer = self.cache()
         self.publish(writer)
-        with patch.object(writer, "write_revision", side_effect=OSError("storage failed")):
+        with patch.object(writer, "_put_revision", side_effect=OSError("storage failed")):
             with self.assertRaises(OSError):
                 self.publish(writer, 200)
         self.assertEqual(writer.latest("prices"), ("prices", 1, 0))
         self.assertEqual(self.cache().latest("prices"), ("prices", 1, 0))
 
-    def test_corrupt_head_is_not_mistaken_for_an_absent_id(self):
+    def test_missing_stale_invalid_and_ahead_hints_are_rebuilt(self):
         writer = self.cache()
         self.publish(writer)
-        for payload in (b"not json", b'["1",0]', b'[1,-1]', b'[1,true]'):
-            obstore.put(writer._store, writer._path("prices", "latest.json"), payload)
-            with self.subTest(payload=payload), patch("obstore.put") as put:
-                with self.assertRaises(ValueError):
-                    self.publish(self.cache(), 200)
-                put.assert_not_called()
+        self.publish(writer)
+        writer.write_dependencies("prices", (("source", 1),))
+        for payload in (None, b"not json", b'"1"', b"true", b"0", b"1", b"999"):
+            for name, expected in (("latest_version.json", b"2"), ("revisions/2/latest.json", b"1")):
+                with self.subTest(payload=payload, name=name):
+                    path = writer._path("prices", name)
+                    if payload is None:
+                        obstore.delete(writer._store, path)
+                    else:
+                        obstore.put(writer._store, path, payload)
+                    self.assertEqual(self.cache().load_latest("prices"), ("prices", 2, 1))
+                    self.assertEqual(bytes(obstore.get(writer._store, path).bytes()), expected)
+
+    def test_corrupt_publication_is_not_treated_as_missing(self):
+        writer = self.cache()
+        self.publish(writer)
+        path = writer._path("prices", "revisions/1/0.json")
+        for payload in (b"not json", b"{}", b"null"):
+            obstore.put(writer._store, path, payload)
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, "Invalid stored publication"):
+                self.cache().load_latest("prices")
 
     def test_session_reads_published_versions_from_shared_storage(self):
         writer = self.cache()
@@ -230,52 +253,65 @@ class StorageContract:
                 self.assertEqual(written.schema.metadata[b"version"], str(version).encode())
                 self.assertEqual(update.previous_revision, (version - 1, 0) if version > 1 else None)
 
-    def test_publication_claim_excludes_version_and_revision_races(self):
-        for first_kind in ("version", "revision"):
-            for second_kind in ("version", "revision"):
-                with self.subTest(first=first_kind, second=second_kind):
-                    namespace = f"race-{first_kind}-{second_kind}"
-                    first, second = self.cache(namespace), self.cache(namespace)
+    def test_same_version_race_cannot_mix_table_and_revision_metadata(self):
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                first, second = self.cache(f"race-{int(existing)}"), self.cache(f"race-{int(existing)}")
+                if existing:
                     self.publish(first)
-                    second.latest("prices")  # Both caches know the same head.
-                    persist = first.write_revision
-                    failures = []
+                persist = first._put_revision
+                def interleave(revision, details, **extra):
+                    second.write(pa.table({"price": [222]}), id="prices", dependencies=(("winner", 2),))
+                    persist(revision, details, **extra)
+                with patch.object(first, "_put_revision", side_effect=interleave):
+                    with self.assertRaises(obstore.exceptions.AlreadyExistsError):
+                        first.write(pa.table({"price": [111]}), id="prices", dependencies=(("loser", 1),))
+                reader = self.cache(f"race-{int(existing)}")
+                head = reader.load_latest("prices")
+                self.assertEqual(head, ("prices", 2 if existing else 1, 0))
+                self.assertEqual(reader.get_version(head[:2])["price"].to_pylist(), [222])
+                self.assertEqual(reader.get_revision(head).dependencies, (("winner", 2),))
 
-                    def attempt(cache, kind):
-                        return (self.publish(cache) if kind == "version" else
-                                cache.write_dependencies("prices", (("source", 1),)))
-
-                    def interleave(revision, details):
-                        with self.assertRaises(obstore.exceptions.AlreadyExistsError) as error:
-                            attempt(second, second_kind)
-                        failures.append(error.exception)
-                        persist(revision, details)
-
-                    with patch.object(first, "write_revision", side_effect=interleave):
-                        _, update = attempt(first, first_kind)
-                    self.assertEqual(len(failures), 1)
-                    expected = (2, 0) if first_kind == "version" else (1, 1)
-                    self.assertEqual(update.revision, expected)
-                    reader = self.cache(namespace)
-                    self.assertEqual(reader.latest("prices"), ("prices", *expected))
-                    paths = {item["path"] for item in obstore.list(reader._store).collect()}
-                    absent = "revisions/1/1.json" if first_kind == "version" else "versions/2.arrow"
-                    self.assertNotIn(reader._path("prices", absent), paths)
-
-    def test_first_publication_claim_excludes_a_second_creator(self):
+    def test_same_revision_race_fails_without_overwriting_or_rebasing(self):
         first, second = self.cache(), self.cache()
-        persist = first.write_version
-
-        def interleave(version, data):
+        self.publish(first)
+        persist = first.write_revision
+        def interleave(revision, details):
+            second.write_dependencies("prices", (("winner", 1),))
+            persist(revision, details)
+        with patch.object(first, "write_revision", side_effect=interleave):
             with self.assertRaises(obstore.exceptions.AlreadyExistsError):
-                self.publish(second)
-            persist(version, data)
+                first.write_dependencies("prices", (("loser", 2),))
+        reader = self.cache()
+        self.assertEqual(reader.load_latest("prices"), ("prices", 1, 1))
+        self.assertEqual(reader.get_revision(("prices", 1, 1)).dependencies, (("winner", 1),))
+        with self.assertRaises(KeyError):
+            reader.get_revision(("prices", 1, 2))
 
-        with patch.object(first, "write_version", side_effect=interleave):
-            self.publish(first)
-        self.assertEqual(self.cache().latest("prices"), ("prices", 1, 0))
+    def test_version_and_revision_writers_can_both_commit_in_either_order(self):
+        for first_kind in ("version", "revision"):
+            with self.subTest(first_kind=first_kind):
+                first, second = self.cache(first_kind), self.cache(first_kind)
+                self.publish(first)
+                persist = first._put_revision
+                def interleave(revision, details, **extra):
+                    if first_kind == "version":
+                        second.write_dependencies("prices", (("source", 1),))
+                    else:
+                        self.publish(second)
+                    persist(revision, details, **extra)
+                with patch.object(first, "_put_revision", side_effect=interleave):
+                    if first_kind == "version":
+                        self.publish(first)
+                    else:
+                        first.write_dependencies("prices", (("source", 1),))
+                reader = self.cache(first_kind)
+                self.assertEqual(reader.load_latest("prices"), ("prices", 2, 0))
+                self.assertEqual(reader.load_latest_revision(("prices", 1)), ("prices", 1, 1))
+                self.assertEqual(reader.get_revision(("prices", 2, 0)).previous_revision, (1, 0))
+                self.assertEqual(list(reader.version_history("prices")), [("prices", 2, 0), ("prices", 1, 1)])
 
-    def test_fresh_publication_head_seals_revisions_missing_from_writer_cache(self):
+    def test_new_version_captures_stored_predecessor_snapshot(self):
         writer = self.cache()
         self.publish(writer)
         successor = self.cache()
@@ -303,7 +339,7 @@ class StorageContract:
         transport.send.assert_called_once_with(changed)
         self.assertEqual(self.cache().get_revision(("prices", 2, 0)).previous_revision, (1, 0))
 
-    def test_invalid_direct_dependency_write_does_not_consume_claim(self):
+    def test_invalid_direct_dependency_write_does_not_consume_revision(self):
         writer = self.cache()
         self.publish(writer)
         with self.assertRaises(ValueError):
@@ -311,38 +347,157 @@ class StorageContract:
         _, update = writer.write_dependencies("prices", (("valid-id", 1),))
         self.assertEqual(update.revision, (1, 1))
 
-    def test_unexpected_head_change_before_commit_fails_without_notification(self):
+    def test_older_version_revision_and_noop_notify_only_when_changed(self):
         writer = self.cache()
+        original, _ = self.publish(writer)
         self.publish(writer)
         transport = Mock(spec=DataFabricTransport)
         session = PollingDataFabricSession(writer, transport)
-        persist = writer.write_revision
-
-        def bypass_claim(revision, details):
-            persist(revision, details)
-            # Simulate a writer that violates the claim protocol. The final
-            # check must not seal count zero over a head that now has count one.
-            persist(("prices", 1, 1), DataRevisionDetails((("source", 1),), (), None, AS_OF))
-            obstore.put(writer._store, writer._path("prices", "latest.json"), b"[1,1]")
-
-        with patch.object(writer, "write_revision", side_effect=bypass_claim):
-            with self.assertRaisesRegex(RuntimeError, "Publication head changed"):
-                session.publish(pa.table({"value": [2]}), id="prices")
+        data, update = session.publish(id="prices", version=1, expected_revision=0,
+                                       dependencies=(("source", 1),))
+        self.assertTrue(data.equals(original, check_metadata=True))
+        self.assertEqual(update.revision, (1, 1))
+        transport.send.assert_called_once_with(update)
+        transport.send.reset_mock()
+        self.assertEqual(session.publish(id="prices", version=1, dependencies=(("source", 1),))[1], update)
         transport.send.assert_not_called()
-        self.assertEqual(writer.peek_latest("prices"), ("prices", 1, 0))
-        self.assertEqual(self.cache().latest("prices"), ("prices", 1, 1))
+        with self.assertRaisesRegex(RuntimeError, "revision has changed"):
+            session.publish(id="prices", version=1, expected_revision=0, dependencies=(("source", 2),))
+        transport.send.assert_not_called()
+        self.assertEqual(writer.latest("prices"), ("prices", 2, 0))
+        self.assertEqual(self.cache().load_latest("prices"), ("prices", 2, 0))
+        self.assertEqual(self.cache().load_latest_revision(("prices", 1)), ("prices", 1, 1))
 
-    def test_failed_claim_owner_is_not_automatically_replaced_or_skipped(self):
+    def test_interrupted_payload_does_not_consume_a_version(self):
+        for existing in (False, True):
+            writer = self.cache(f"interrupted-{int(existing)}")
+            if existing:
+                self.publish(writer)
+            with patch.object(writer, "_put_revision", side_effect=OSError("interrupted")):
+                with self.assertRaises(OSError):
+                    self.publish(writer)
+            fresh = self.cache(f"interrupted-{int(existing)}")
+            _, update = self.publish(fresh)
+            self.assertEqual(update.revision, (2 if existing else 1, 0))
+            paths = [item["path"] for item in obstore.list(writer._store).collect()]
+            self.assertFalse(any("/publications/" in path for path in paths))
+
+    def test_committed_publications_recover_after_each_pointer_failure(self):
+        for fail_method in ("write_latest_revision", "write_latest_version"):
+            for existing in (False, True):
+                namespace = f"failure-{fail_method}-{int(existing)}"
+                writer = self.cache(namespace)
+                if existing:
+                    self.publish(writer)
+                with patch.object(writer, fail_method, side_effect=OSError("interrupted")):
+                    with self.assertRaises(OSError):
+                        self.publish(writer)
+                fresh = self.cache(namespace)
+                version = 2 if existing else 1
+                self.assertEqual(fresh.load_latest("prices"), ("prices", version, 0))
+                self.assertEqual(self.publish(fresh)[1].revision, (version + 1, 0))
+
+    def test_recovery_returns_old_version_updates_and_does_not_load_tables(self):
         writer = self.cache()
         self.publish(writer)
-        with patch.object(writer, "write_version", side_effect=OSError("interrupted")):
+        self.publish(writer)
+        with patch.object(writer, "write_latest_revision", side_effect=OSError("interrupted")):
             with self.assertRaises(OSError):
-                self.publish(writer)
-        with self.assertRaises(obstore.exceptions.AlreadyExistsError):
-            self.publish(self.cache())
-        self.assertEqual(self.cache().latest("prices"), ("prices", 1, 0))
-        self.cache().write(pa.table({"value": [1]}), id="independent")
-        self.assertEqual(self.cache().latest("independent"), ("independent", 1, 0))
+                writer.write_dependencies("prices", (("source", 1),), version=1)
+        reader = self.cache()
+        with patch("obstore.get", wraps=obstore.get) as get:
+            updates = reader.recover("prices")
+        self.assertEqual([u.revision for u in updates], [(1, 1), (2, 0)])
+        self.assertEqual(updates[0].dependencies, (("source", 1),))
+        self.assertFalse(any(call.args[1].endswith(".arrow") for call in get.call_args_list))
+        for update in updates:
+            reader.apply_update(update)
+        self.assertEqual(reader.latest("prices"), ("prices", 2, 0))
+        self.assertEqual(reader.get_latest_revision(("prices", 1)), ("prices", 1, 1))
+        self.assertEqual(reader.recover("prices"), updates)
+        self.assertEqual(reader.write_dependencies("prices", (("source", 2),), version=1)[1].revision, (1, 2))
+
+    def test_delayed_pointer_writes_are_repaired_without_regressing_resolved_heads(self):
+        writer = self.cache()
+        self.publish(writer)
+        writer.write_dependencies("prices", (("source", 1),))
+        self.publish(writer)
+        writer.write_dependencies("prices", (("source", 2),), version=1)
+        writer.write_latest_version(("prices", 1))
+        writer.write_latest_revision(("prices", 1, 0))
+        fresh = self.cache()
+        self.assertEqual(fresh.load_latest("prices"), ("prices", 2, 0))
+        self.assertEqual(fresh.load_latest_revision(("prices", 1)), ("prices", 1, 2))
+
+    def test_actual_parallel_writers_have_one_winner_per_publication(self):
+        for kind in ("version", "revision"):
+            with self.subTest(kind=kind):
+                writers = [self.cache(f"parallel-{kind}") for _ in range(2)]
+                if kind == "revision":
+                    self.publish(writers[0])
+                barrier = Barrier(2)
+                def publish(index):
+                    cache = writers[index]
+                    persist = cache._put_revision
+                    def together(*args, **kwargs):
+                        barrier.wait(timeout=10)
+                        persist(*args, **kwargs)
+                    with patch.object(cache, "_put_revision", side_effect=together):
+                        try:
+                            data = pa.table({"owner": [index]}) if kind == "version" else None
+                            return cache.write(data, id="prices", dependencies=((f"owner{index}", 1),))[1]
+                        except obstore.exceptions.AlreadyExistsError:
+                            return None
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    results = list(pool.map(publish, range(2)))
+                self.assertEqual(sum(result is not None for result in results), 1)
+                winner = next(i for i, result in enumerate(results) if result is not None)
+                reader = self.cache(f"parallel-{kind}")
+                head = reader.load_latest("prices")
+                self.assertEqual(head, ("prices", 1, 0 if kind == "version" else 1))
+                self.assertEqual(reader.get_revision(head).dependencies, ((f"owner{winner}", 1),))
+                if kind == "version":
+                    self.assertEqual(reader.get_version(head[:2])["owner"].to_pylist(), [winner])
+
+    def test_recovered_old_version_notification_releases_waiting_cut(self):
+        writer = self.cache()
+        for value in (1, 2):
+            writer.write(pa.table({"value": [value]}), id="x")
+        writer.write(pa.table({"value": [1]}), id="m", dependencies=(("x", 1),))
+        writer.write(pa.table({"value": [2]}), id="m", dependencies=(("x", 2),))
+        for root in ("a", "c"):
+            writer.write(pa.table({"value": [1]}), id=root)
+            writer.write(pa.table({"value": [2]}), id=root, dependencies=(("m", 1),))
+        writer.write(pa.table({"value": [1]}), id="b", dependencies=(("x", 2),))
+        session = DataFabricSession(self.cache())
+        session.add_subscriptions(("a", "c", "b"))
+        self.assertEqual({key: table["value"][0].as_py() for key, table in session.get_consistent_cut().items()},
+                         {"a": 1, "c": 1, "b": 1})
+        with patch.object(writer, "write_latest_revision", side_effect=OSError("interrupted")):
+            with self.assertRaises(OSError):
+                writer.write_dependencies("m", (("x", 2),), version=1)
+        deltas = {}
+        for update in self.cache().recover("m"):
+            deltas.update(session.apply_update(update))
+        self.assertEqual({key: table["value"][0].as_py() for key, table in deltas.items()}, {"a": 2, "c": 2})
+        for update in self.cache().recover("m"):
+            self.assertEqual(session.apply_update(update), {})
+
+    def test_root_history_search_includes_revisions_after_successor_snapshot(self):
+        writer = self.cache()
+        for value in (1, 2, 3):
+            writer.write(pa.table({"value": [value]}), id="x")
+        writer.write(pa.table({"value": [1]}), id="a", dependencies=(("x", 1),))
+        writer.write(pa.table({"value": [2]}), id="a", dependencies=(("x", 3),))
+        writer.write(pa.table({"value": [1]}), id="b", dependencies=(("x", 2),))
+        writer.write_dependencies("a", (("x", 2),), version=1)
+        self.assertEqual(writer.get_revision(("a", 2, 0)).previous_revision, (1, 0))
+        session = DataFabricSession(self.cache())
+        session.add_subscriptions(("a", "b"))
+        cut = session.get_consistent_cut()
+        self.assertEqual(cut["a"].schema.metadata[b"version"], b"1")
+        self.assertEqual(session._subscriptions._subscriptions["a"].current_revision, ("a", 1, 1))
+
 
 
 class MemoryStoreTests(StorageContract, unittest.TestCase):

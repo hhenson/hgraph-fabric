@@ -71,10 +71,9 @@ notification changes paths; the new records are used to resolve the cut. Removin
 a dependency can be what unblocks progress, so refreshed indexes or retired
 watches must not retroactively disqualify that notification.
 `cleanup_conflicts()` runs after the attempt and retires caught-up roots and
-historical paths whose root candidates fall below current. A watch can also
-retire when cached revision-zero links prove its version's final count has
-already been observed. An outstanding final revision remains watched even if
-its notification follows a successor version. Versions with neither indexed
+historical paths whose root candidates fall below current. A successor version
+never closes the older version's revision history: a later revision can still
+unblock an admissible candidate, so those watches remain live. Versions with neither indexed
 dependents nor admissible historical conflict paths are retired. Cleanup runs
 after each completed update (including a blocked update) and initial cut, and can also be
 called explicitly. Live conflicts remain tracked while roots are waiting.
@@ -137,7 +136,7 @@ follows revision-zero links to previous data versions. During updates, the
 committed root remains the lower bound; rejected proposals leave current intact.
 
 Only after intermediate resolution fails does root history search follow
-revision-zero links carrying the preceding version's final count. Exact
+revision-zero links and the preceding version's own revision head. Exact
 alignments take precedence over consistent omissions; both sides' intermediate choices may need to change.
 Every shared data version must agree, including upstream nodes when one root
 occurs in the other graph. Once that containment is coherent, it counts as an
@@ -146,16 +145,17 @@ normal search cannot align roots with one side fixed, a bounded fallback searche
 both root histories. Root combinations and intermediate choices can require
 exhaustive search; no globally newest cut or logarithmic overall cost is claimed.
 
-The cache's `latest(data_id)` returns a revision ID. Historical version lookup
-starts there and follows the `(version, revision_count)` pair in
-`previous_revision` from each version's revision-0 record, retaining the same
-data ID. That pair identifies the previous version and its maximum revision;
-`None` marks the end of the chain.
+The cache's `latest(data_id)` returns a revision ID, combining the dataset's
+latest version with that version's latest revision. `get_latest_revision(version_id)`
+loads the head for that exact version, including revisions published after a
+successor version. Revision-zero `previous_revision` links retain the preceding
+version and its count observed at publication time; that count is a snapshot,
+not a final bound. `None` marks the first version.
 
 Notifications for an ID whose head has not been loaded are retained as hints.
 The first `latest` lookup combines those hints with the stored head, so an older
 notification cannot hide a newer version that predates the session. Historical
-version lookups likewise combine notified counts with their stored history link.
+version lookups likewise combine notified counts with their stored version head.
 Pending hints are retired as those lookups resolve; notifications alone do not
 make an unseen head available through `peek_latest`.
 
@@ -169,9 +169,9 @@ the version-specific lookup cache, even if other cached metadata could resolve i
 cached through `get_version(version_id)` or `get_revision(revision_id)` without a
 latest record. It does not enumerate storage. `version_history(data_id)` lazily
 yields `(id, version, maximum_revision_count)` newest first, following revision-zero
-links and loading missing metadata. `peek_version_history(data_id)` yields only
-the prefix reachable from the cached latest and headers, stopping at the first
-missing link without loading. Missing storage records raise in the loading form;
+links and resolving each preceding version's own revision head. `peek_version_history(data_id)` yields only
+the prefix reachable from cached heads and headers, stopping at the first
+uncached head or link without loading. Missing storage records raise in the loading form;
 malformed history links raise in either form.
 
 `cache.write(data=None, id=None, dependencies=(), weak_dependencies=(), as_of=None)`
@@ -183,25 +183,32 @@ at 1. Each new table gets `latest_version + 1`; input version metadata is replac
 `as_of` is preserved independently and does not allocate or order versions.
 Other metadata and the input table are preserved.
 
-Writes create revision zero, retaining the previous version and its final count.
-Allocation reads `load_latest` from storage, even when a reader head is cached.
-Storage subclasses implement `reserve_write(DataId, previous)`, followed by
-`write_version(DataVersionId, Table)`, `write_revision(DataRevisionId,
-DataRevisionDetails)`, and `write_latest(DataId, LatestDataDetails, previous)`.
-The reservation must exclusively claim a successor of the expected head for
-both table and dependency-only publications. The final head write checks that
-storage still contains that predecessor. `previous` is a full revision ID, or
-`None` for a new dataset. `load_latest` raises `KeyError` for a new ID.
-After successful persistence, the cache retains the table and metadata; deliver
-the returned update to every associated manager as part of the coordinated
-write/notification operation. Storage errors propagate.
+Writes create revision zero, recording the preceding version and its observed
+revision count. Allocation reads `load_latest` from storage, even when a reader
+head is cached. Storage subclasses atomically publish a table with revision zero
+through `write_version(DataVersionId, Table, DataRevisionDetails)`. They also
+implement create-only `write_revision(DataRevisionId, DataRevisionDetails)`,
+`write_latest_version(DataVersionId)` and `write_latest_revision(DataRevisionId)`.
+The two head writes update recoverable hints after publication; no reservation
+is retained. `load_latest_revision(DataVersionId)` resolves that version's own
+head, while `load_latest(DataId)` composes both levels and raises `KeyError` for
+a new ID. After successful persistence, deliver the returned update to every
+associated manager as part of the coordinated write/notification operation.
+Storage errors propagate; a failure after publication may require notification
+recovery even though the publication itself is already readable.
 
 Omit the table to update dependencies on the latest version:
 `cache.write(id="prices", dependencies=(("source", 7),))`, or call
 `cache.write_dependencies("prices", dependencies=(("source", 7),))` directly.
+Pass `version=1` to revise an older version. Without it, the attempt selects the
+stored latest version once and remains pinned to that version throughout the
+write. Optional `expected_revision=3` requires that version's current count to
+be three; a mismatch fails rather than rebasing a computation on different
+metadata. These keywords also pass through session publishing and the worker's
+publish callable. They are rejected when supplying a new table.
 Supply the complete strong and weak dependency tuples; omitted tuples are empty.
-Changed dependencies increment the revision count and persist only revision and
-latest metadata. Unchanged tuples return the existing `(Table, DataUpdateDetails)`
+Changed dependencies increment the revision count and persist only the revision and
+its per-version head. Unchanged tuples return the existing `(Table, DataUpdateDetails)`
 without writes, even when `as_of` differs. The table retains its original version
 metadata; the new revision's `as_of` is recorded in the update details. An unknown
 ID raises `KeyError`. Supplying a table always creates a new version, without a
@@ -241,9 +248,10 @@ dependency tuples remain distinct from empty tuples. Namespaces and IDs appear
 verbatim in readable paths, for example:
 
 ```text
-market-data/equities/us/prices.close/versions/100.arrow
-market-data/equities/us/prices.close/revisions/100/0.json
-market-data/equities/us/prices.close/latest.json
+market-data/equities/us/prices.close/versions/1/<payload-uuid>.arrow
+market-data/equities/us/prices.close/revisions/1/0.json
+market-data/equities/us/prices.close/revisions/1/latest.json
+market-data/equities/us/prices.close/latest_version.json
 ```
 
 Namespaces support `/`-separated segments, such as `market-data/equities/us`.
@@ -257,22 +265,42 @@ starting and ending with a letter or digit. Windows device names such as `con`,
 case-insensitive filesystems. Invalid names raise `ValueError` before storage
 access; names are never escaped or silently normalised.
 
-Publication first creates an immutable claim under
-`publications/<previous-version>-<previous-count>.json` (or `publications/initial.json`
-for a new dataset). Both kinds of publication compete for the same predecessor
-claim, so a version write cannot race a dependency-only revision unnoticed.
-It then creates the table, if any, and revision, verifies the stored predecessor,
-and writes latest last. History objects and claims are create-only.
+For a new table, the writer uploads an Arrow payload under a unique name, then
+atomically creates revision zero containing the payload reference and revision
+metadata. That single create commits the publication. Writers competing for the
+same version cannot combine one writer's table with another's dependencies.
+An interrupted upload or a failed revision-zero create can leave an unreferenced
+payload; it does not occupy a version number or block the next writer. Removing
+those orphan payloads is separate maintenance.
 
-Keep one coordinated writer per dataset. These checks detect conflicting writers;
-they do not provide retry, lease takeover or recovery. Claims are retained and do
-not expire: a suspended writer must not resume after a timeout and overwrite a
-successor. A failed publication can leave a claim and unreferenced payloads;
-stop processing and repair explicitly before resuming that dataset. Never skip
-the occupied version to continue. Other datasets remain independent. Only a
-successful head commit can produce a publication notification. Storage errors
-propagate; only missing objects become the cache's `KeyError`. Arrow snapshots
-are buffered in memory for upload.
+Dependency-only writes atomically create the next revision in the selected
+version. Two writers choosing the same revision or version fail on the duplicate
+create; callers receive the conflict without an automatic retry. A version write
+and a revision on its predecessor can both succeed: the latter updates only the
+predecessor's revision head. Older versions remain revisable.
+
+`latest_version.json` contains the dataset version number; each version's
+`revisions/<version>/latest.json` contains its revision count. These pointers are
+hints. A read validates the hinted publication and probes consecutive records
+beyond it, repairing missing, stale or invalid hints. Publication records are
+immutable and authoritative. A delayed pointer write cannot hide committed
+successors from a fresh lookup. Missing or corrupt publication records are not
+repairable from pointers; retained contiguous history is required.
+
+`cache.recover(id)` scans from the first publication, rebuilds both kinds of
+pointer, and returns a tuple of `DataUpdateDetails`, one for each version's latest
+revision. Deliver these to the associated managers and send them through the
+transport to cover notifications lost after a commit. Duplicate delivery is safe.
+Including older versions is necessary because their revisions can unblock cuts.
+Recovery does not itself send notifications or refresh reader caches. Automatic
+pointer repair alone does not wake subscribers; a failed writer's notification
+recovery must be driven by the application. Recovery observes the publications
+available during its scan; concurrent later publications still need their normal
+notifications or a subsequent recovery pass.
+
+Storage errors propagate; only missing objects become the cache's `KeyError`.
+Arrow snapshots are buffered in memory for upload. No permanent reservations,
+lease takeover, or global sequence are required.
 
 Readers retain the normal cache semantics: deliver updates to their associated
 managers, or construct a fresh cache to load a new snapshot from storage.

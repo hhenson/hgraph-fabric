@@ -64,7 +64,7 @@ class PublishedStream(Stream):
         self.transport.send.assert_called_with(update)
         if version is None:
             self.case.assertEqual(revision, (key, before[1], before[2] + 1))
-            self.case.assertEqual([entry[0] for entry in self.writer_cache.writes[writes:]], ["revision", "latest"])
+            self.case.assertEqual([entry[0] for entry in self.writer_cache.writes[writes:]], ["revision", "latest_revision"])
             self.case.assertIs(returned, self.writer_cache.get_version(before[:2]))
         self.history.records[revision] = update
         self.history.heads[key] = revision

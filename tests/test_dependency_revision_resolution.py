@@ -33,14 +33,14 @@ class Process:
                 assert result.setdefault(node, version) == version
         return result
 
-    def publish(self, key, value=None):
+    def publish(self, key, value=None, *, version=None):
         self.nodes()  # The producer's actual selected input graphs must agree.
         deps = tuple(sub.current_revision[:2] for sub in self.subscriptions.values())
         for dep in deps:
             self.cache.get_version(dep)
         data = None if value is None else pa.table({'value': [value]})
         self.world.time += timedelta(seconds=1)
-        _, update = self.session.publish(data, id=key, dependencies=deps, as_of=self.world.time)
+        _, update = self.session.publish(data, id=key, dependencies=deps, as_of=self.world.time, version=version)
         revision = key, *update.revision
         assert revision in self.world.storage[2]  # Stored before notification.
         before = {p: p.cut() for p in self.world.processes}

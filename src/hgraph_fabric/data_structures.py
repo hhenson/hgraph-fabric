@@ -21,7 +21,8 @@ type DataIdKey = tuple[DataNamespace, DataId] # Required by the load/store the a
 class DataRevisionDetails:
     """
     The previous_revision is set when the details are stored at revision 0.
-    This allows us to chain version.
+    It records the preceding version and its revision at publication time.
+    That count is a snapshot, not a final count: older versions remain revisable.
     """
     dependencies: tuple[DataVersionId, ...] | None
     weak_dependencies: tuple[DataVersionId, ...] | None

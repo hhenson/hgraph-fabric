@@ -47,16 +47,21 @@ class DataFabricSession:
         dependencies: tuple[DataVersionId, ...] = (),
         weak_dependencies: tuple[DataVersionId, ...] = (),
         as_of: datetime | None = None,
+        *,
+        version: int | None = None,
+        expected_revision: int | None = None,
     ) -> tuple[Table, DataUpdateDetails]:
         """Persist data; the driver delivers the returned update to sessions.
 
-        Omit data to revise the latest version's dependencies. An unchanged
+        Omit data to revise dependencies; version selects an older version,
+        otherwise the stored latest is selected for this attempt. An unchanged
         dependency publication returns existing details without a new revision.
 
         Deliver to every session sharing this cache before the next cut/read,
         including this session when it has subscriptions.
         """
-        return self._cache.write(data, id, dependencies, weak_dependencies, as_of)
+        return self._cache.write(data, id, dependencies, weak_dependencies, as_of,
+                                 version=version, expected_revision=expected_revision)
 
     def _tables(self, versions: Iterable[DataVersionId]) -> dict[DataId, Table]:
         return {version[0]: self._cache.get_version(version) for version in versions}
@@ -152,10 +157,20 @@ class PollingDataFabricSession(DataFabricSession):
         dependencies: tuple[DataVersionId, ...] = (),
         weak_dependencies: tuple[DataVersionId, ...] = (),
         as_of: datetime | None = None,
+        *,
+        version: int | None = None,
+        expected_revision: int | None = None,
     ) -> tuple[Table, DataUpdateDetails]:
         """Persist before sending; local subscriptions advance through poll()."""
-        previous = self._cache.load_latest(id) if data is None and id is not None else None
-        data, update = super().publish(data, id, dependencies, weak_dependencies, as_of)
+        previous = None
+        if data is None and id is not None:
+            previous = (self._cache.load_latest(id) if version is None else
+                        self._cache.load_latest_revision((id, version)))
+            version = previous[1]
+            if expected_revision is None:
+                expected_revision = previous[2]
+        data, update = super().publish(data, id, dependencies, weak_dependencies, as_of,
+                                       version=version, expected_revision=expected_revision)
         if previous != (update.id, *update.revision):
             self._transport.send(update)
         return data, update
@@ -201,6 +216,9 @@ def run_data_fabric_session(
         dependencies: tuple[DataVersionId, ...] = (),
         weak_dependencies: tuple[DataVersionId, ...] = (),
         as_of: datetime | None = None,
+        *,
+        version: int | None = None,
+        expected_revision: int | None = None,
     ) -> tuple[Table, DataUpdateDetails]:
         result: Future[tuple[Table, DataUpdateDetails]] = Future()
         on_worker = current_thread() is thread
@@ -209,7 +227,8 @@ def run_data_fabric_session(
                 if finished.done():
                     finished.result()  # Report the worker's failure if it died.
                 raise RuntimeError("Data fabric session is closed")
-            operation = partial(session.publish, data, id, dependencies, weak_dependencies, as_of)
+            operation = partial(session.publish, data, id, dependencies, weak_dependencies, as_of,
+                                version=version, expected_revision=expected_revision)
             if not on_worker:
                 requests.put((result, operation))
         # The callback is already on the owner thread: waiting on the queue
