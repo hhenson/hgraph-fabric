@@ -140,7 +140,7 @@ class ConflictTrackerReview(unittest.TestCase):
             manager.apply_update(update)
         self.assertEqual(current_cut(manager), before)
 
-    def test_retired_versions_are_removed_while_the_roots_are_still_waiting(self):
+    def test_admissible_historical_versions_remain_watched_while_roots_wait(self):
         history, cache, manager = waiting()
         for version in range(200, 1200, 100):
             manager.apply_update(history.add("middle", version, dependencies=(("x", 1),)))
@@ -150,9 +150,10 @@ class ConflictTrackerReview(unittest.TestCase):
                 )), set())
         self.assertEqual(current_cut(manager), {key: (key, 100, 0) for key in ("a", "b", "peer")})
         self.assertEqual({key for key in manager._dependents if key[0] == "middle"}, {("middle", 1100)})
-        # Only the last version is reachable from any selected current/latest
-        # tree. Older entries should not grow with every rejected publication.
-        self.assertEqual({key for key in manager._conflicts if key[0] == "middle"}, {("middle", 1100)})
+        # Rejected root candidates still refer to these older versions. Each
+        # can receive a revision and permit a forward cut, even after rotation.
+        self.assertEqual({key for key in manager._conflicts if key[0] == "middle"},
+                         {("middle", version) for version in range(100, 1200, 100)})
 
     def test_coordinated_shared_cache_updates_revalidate_each_manager(self):
         history = History()

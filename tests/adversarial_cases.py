@@ -27,7 +27,7 @@ class History:
         )
         key = (data_id, version, count)
         self.records[key] = update
-        self.heads[data_id] = key
+        self.heads[data_id] = max(self.heads.get(data_id, key), key)
         return update
 
     def revisions(self, data_id, ceiling=None):
@@ -129,14 +129,24 @@ class HistoryCache(DataCache):
     def load_version(self, version):
         raise AssertionError("Metadata search must not load dataframe payloads")
 
-    def write_version(self, version_id, data):
+    def load_latest_revision(self, version_id):
+        candidates = [r for r in self.history.records if r[:2] == version_id]
+        if not candidates:
+            raise KeyError(version_id)
+        return max(candidates)
+
+    def write_version(self, version_id, data, details):
         raise AssertionError("Metadata search must not write data")
 
     def write_revision(self, revision_id, details):
         raise AssertionError("Metadata search must not write revisions")
 
-    def write_latest(self, data_id, details):
+    def write_latest_version(self, version_id):
         raise AssertionError("Metadata search must not write latest")
+
+    def write_latest_revision(self, revision_id):
+        raise AssertionError("Read-only fixture must not write heads")
+
 
 
 def current_cut(manager):

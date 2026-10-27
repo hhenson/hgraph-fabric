@@ -33,14 +33,14 @@ class Process:
                 assert result.setdefault(node, version) == version
         return result
 
-    def publish(self, key, version=None):
+    def publish(self, key, value=None, *, version=None):
         self.nodes()  # The producer's actual selected input graphs must agree.
         deps = tuple(sub.current_revision[:2] for sub in self.subscriptions.values())
         for dep in deps:
             self.cache.get_version(dep)
-        data = None if version is None else pa.table({'value': [1]}, metadata={b'version': str(version).encode()})
+        data = None if value is None else pa.table({'value': [value]})
         self.world.time += timedelta(seconds=1)
-        _, update = self.session.publish(data, id=key, dependencies=deps, as_of=self.world.time)
+        _, update = self.session.publish(data, id=key, dependencies=deps, as_of=self.world.time, version=version)
         revision = key, *update.revision
         assert revision in self.world.storage[2]  # Stored before notification.
         before = {p: p.cut() for p in self.world.processes}
@@ -91,13 +91,13 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
                 world = World()
                 world.history()
                 reader = world.process('reader', order)
-                self.assertEqual(reader.cut(), {'a': ('a', 200, 0), 'b': ('b', 100, 0)})
-                self.assertEqual(reader.nodes()['x'], 3)
+                self.assertEqual(reader.cut(), {'a': ('a', 1, 0), 'b': ('b', 1, 0)})
+                self.assertEqual(reader.nodes()['x'], 2)
                 a = reader.subscriptions['a']
-                self.assertEqual(a.current_dependency_revisions[('m', 100)], ('m', 100, 1))
+                self.assertEqual(a.current_dependency_revisions[('m', 1)], ('m', 1, 1))
                 # Explicit reads of the committed graph retain the choice.
-                self.assertEqual(a.current(reader.cache).get_data_version_id('x'), ('x', 3))
-                self.assertEqual(reader.cache.get_latest_revision(('m', 100)), ('m', 100, 3))
+                self.assertEqual(a.current(reader.cache).get_data_version_id('x'), ('x', 2))
+                self.assertEqual(reader.cache.get_latest_revision(('m', 1)), ('m', 1, 3))
 
     def test_committed_choice_survives_notification_and_failed_proposal(self):
         world = World()
@@ -106,16 +106,16 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
         before = reader.cut()
         source.publish('x', 9)
         middle.publish('m')
-        self.assertEqual(reader.received[-1], ('m', 100, 4))
+        self.assertEqual(reader.received[-1], ('m', 1, 4))
         self.assertEqual(reader.cut(), before)
-        self.assertEqual(reader.nodes()['x'], 3)
-        self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)], ('m', 100, 1))
-        # B publishes a new value from its real X@9 subscription. Resolution can
+        self.assertEqual(reader.nodes()['x'], 2)
+        self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 1)], ('m', 1, 1))
+        # B publishes a new value from its real X@5 subscription. Resolution can
         # now select M's latest record and commit both graph choices together.
         peer.publish('b', 300)
-        self.assertEqual(reader.cut()['b'], ('b', 300, 0))
-        self.assertEqual(reader.nodes()['x'], 9)
-        self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)], ('m', 100, 4))
+        self.assertEqual(reader.cut()['b'], ('b', 2, 0))
+        self.assertEqual(reader.nodes()['x'], 5)
+        self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 1)], ('m', 1, 4))
 
     def test_recursive_resolution_through_two_intermediates(self):
         world = World()
@@ -125,21 +125,21 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
         root = world.process('root', ['outer'])
         root.publish('root', 900)
         reader = world.process('reader', ['root', 'b'])
-        self.assertEqual(reader.nodes()['x'], 3)
+        self.assertEqual(reader.nodes()['x'], 2)
         choices = reader.subscriptions['root'].current_dependency_revisions
-        self.assertEqual(choices[('outer', 500)], ('outer', 500, 0))
-        self.assertEqual(choices[('m', 100)], ('m', 100, 1))
+        self.assertEqual(choices[('outer', 1)], ('outer', 1, 0))
+        self.assertEqual(choices[('m', 1)], ('m', 1, 1))
 
     def test_single_root_can_resolve_its_two_paths(self):
         world = World()
         source, middle, _, peer = world.history()
-        # Obtain an X@3-dependent value and the retained M value through a real
+        # Obtain an X@2-dependent value and the retained M value through a real
         # input cut. The root records only these two immediate value versions.
         producer = world.process('diamond producer', ['m', 'b'])
         producer.publish('diamond', 600)
         reader = world.process('reader', ['diamond'])
-        self.assertEqual(reader.nodes()['x'], 3)
-        self.assertEqual(reader.subscriptions['diamond'].current_dependency_revisions[('m', 100)], ('m', 100, 1))
+        self.assertEqual(reader.nodes()['x'], 2)
+        self.assertEqual(reader.subscriptions['diamond'].current_dependency_revisions[('m', 1)], ('m', 1, 1))
 
     def test_three_subscriptions_recheck_changed_dependency_choices(self):
         for order in permutations(('a', 'b', 'c')):
@@ -157,8 +157,8 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
             source.publish('x', 7)
             middle.publish('m')
             reader = world.process('reader', order)
-            self.assertEqual(reader.nodes()['x'], 3)
-            self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)], ('m', 100, 1))
+            self.assertEqual(reader.nodes()['x'], 2)
+            self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 1)], ('m', 1, 1))
 
     def test_both_intermediates_can_move_without_changing_either_root(self):
         world = World()
@@ -176,9 +176,9 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
         m.publish('m')
         reader = world.process('reader', ['a', 'b'])
         self.assertEqual(reader.nodes()['x'], 1)
-        self.assertEqual(reader.cut(), {'a': ('a', 300, 0), 'b': ('b', 400, 0)})
-        self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)], ('m', 100, 0))
-        self.assertEqual(reader.subscriptions['b'].current_dependency_revisions[('n', 200)], ('n', 200, 0))
+        self.assertEqual(reader.cut(), {'a': ('a', 1, 0), 'b': ('b', 1, 0)})
+        self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 1)], ('m', 1, 0))
+        self.assertEqual(reader.subscriptions['b'].current_dependency_revisions[('n', 1)], ('n', 1, 0))
 
     def test_rejected_root_update_keeps_committed_dependency_choices(self):
         world = World()
@@ -188,12 +188,12 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
         a = reader.subscriptions['a']
         graph = a.current(reader.cache)
         choices = a.current_dependency_revisions
-        source.publish('x', 9)  # M has not published a revision for X@9 yet.
+        source.publish('x', 9)  # M has not published a revision for X@5 yet.
         peer.publish('b', 300)
         self.assertEqual(reader.cut(), before)
         self.assertIs(a.current(reader.cache), graph)
         self.assertEqual(a.current_dependency_revisions, choices)
-        self.assertEqual(reader.nodes()['x'], 3)
+        self.assertEqual(reader.nodes()['x'], 2)
 
     def test_parent_backtracking_does_not_search_unrelated_branch_history(self):
         for order in permutations(('a', 'b')):
@@ -226,18 +226,18 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
 
                 reader = world.process('reader', order)
                 choices = reader.subscriptions['a'].current_dependency_revisions
-                self.assertEqual(reader.cut()['a'], ('a', 600, 0))
-                self.assertEqual(choices[('p', 400)], ('p', 400, 0))
-                self.assertEqual(choices[('m', 100)], ('m', 100, 1))
-                self.assertEqual(choices[('z', 500)], ('z', 500, 1))
+                self.assertEqual(reader.cut()['a'], ('a', 1, 0))
+                self.assertEqual(choices[('p', 1)], ('p', 1, 0))
+                self.assertEqual(choices[('m', 1)], ('m', 1, 1))
+                self.assertEqual(choices[('z', 1)], ('z', 1, 1))
                 reads = [key for kind, key in reader.cache.loads if kind == 'revision']
-                # M@200/r0 is too high. Walk back to P, then forward through
-                # its older M reference and probe M@100/r0 before matching r1.
-                self.assertLess(reads.index(('m', 200, 0)), reads.index(('p', 400, 0)))
-                self.assertLess(reads.index(('p', 400, 0)), reads.index(('m', 100, 0)))
-                self.assertNotIn(('z', 500, 0), reads)
+                # M@2/r0 is too high. Walk back to P, then forward through
+                # its older M reference and probe M@1/r0 before matching r1.
+                self.assertLess(reads.index(('m', 2, 0)), reads.index(('p', 1, 0)))
+                self.assertLess(reads.index(('p', 1, 0)), reads.index(('m', 1, 0)))
+                self.assertNotIn(('z', 1, 0), reads)
 
-    def test_path_search_reaches_subscribed_parent_across_sparse_versions(self):
+    def test_path_search_reaches_subscribed_parent_across_versions(self):
         for order in permutations(('a', 'b')):
             with self.subTest(order=order):
                 world = World()
@@ -249,12 +249,12 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
                     source.publish('x', version)
                     middle.publish('m')
                 reader = world.process('reader', order)
-                self.assertEqual(reader.cut()['a'], ('a', 200, 0))
-                self.assertEqual(reader.nodes()['x'], 3)
-                self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)], ('m', 100, 1))
+                self.assertEqual(reader.cut()['a'], ('a', 1, 0))
+                self.assertEqual(reader.nodes()['x'], 2)
+                self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 1)], ('m', 1, 1))
                 reads = [key for kind, key in reader.cache.loads if kind == 'revision']
-                self.assertLess(reads.index(('m', 200, 0)), reads.index(('m', 100, 0)))
-                self.assertIn(('a', 900, 0), reads)  # Its stored link reaches A@200.
+                self.assertLess(reads.index(('m', 2, 0)), reads.index(('m', 1, 0)))
+                self.assertIn(('a', 2, 0), reads)  # Its stored link reaches A@200.
 
     def test_shared_conflict_requires_repairing_both_parent_paths(self):
         world = World()
@@ -277,11 +277,11 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
             parent.publish(parent.name)
         reader = world.process('reader', ['a', 'b'])
         choices = reader.subscriptions['a'].current_dependency_revisions
-        self.assertEqual(choices[('p', 400)], ('p', 400, 0))
-        self.assertEqual(choices[('q', 400)], ('q', 400, 0))
-        self.assertEqual(choices[('m', 100)], ('m', 100, 1))
-        self.assertNotIn(('m', 200), choices)
-        self.assertEqual(reader.nodes()['x'], 3)
+        self.assertEqual(choices[('p', 1)], ('p', 1, 0))
+        self.assertEqual(choices[('q', 1)], ('q', 1, 0))
+        self.assertEqual(choices[('m', 1)], ('m', 1, 1))
+        self.assertNotIn(('m', 2), choices)
+        self.assertEqual(reader.nodes()['x'], 2)
 
     def test_path_match_checks_all_shared_inputs_and_keeps_newest_matching_count(self):
         for peer_inputs, expected_count in ((['x'], 2), (['x', 'y'], 1)):
@@ -301,9 +301,9 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
                 source.publish('x', 7)
                 middle.publish('m')
                 reader = world.process('reader', ['a', 'b'])
-                self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)],
-                                 ('m', 100, expected_count))
-                self.assertEqual(reader.nodes()['x'], 3)
+                self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 1)],
+                                 ('m', 1, expected_count))
+                self.assertEqual(reader.nodes()['x'], 2)
 
     def test_parent_search_on_update_keeps_current_then_advances_when_peer_catches_up(self):
         world = World()
@@ -314,10 +314,10 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
         middle.publish('m', 200)
         producer.publish('a', 900)
         self.assertEqual(reader.cut(), before)
-        self.assertEqual(reader.nodes()['x'], 3)
+        self.assertEqual(reader.nodes()['x'], 2)
         peer.publish('b', 800)
-        self.assertEqual(reader.cut(), {'a': ('a', 900, 0), 'b': ('b', 800, 0)})
-        self.assertEqual(reader.nodes()['x'], 9)
+        self.assertEqual(reader.cut(), {'a': ('a', 2, 0), 'b': ('b', 2, 0)})
+        self.assertEqual(reader.nodes()['x'], 5)
 
     def test_binary_count_bounds_use_immediate_records(self):
         world = World()
@@ -331,7 +331,7 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
         # The first probe is latest; subsequent counts are bounded by binary
         # searches over verified immutable immediate-dependency columns.
         search = RevisionSearch(middle.cache)
-        self.assertEqual(list(search.counts(('m', 100), 32, {'x': 17})), [32, 16])
+        self.assertEqual(list(search.counts(('m', 1), 32, {'x': 17})), [32, 16])
 
     def test_intermediate_exact_match_precedes_newer_omission(self):
         world = World()
@@ -350,9 +350,9 @@ class DependencyRevisionResolutionTests(unittest.TestCase):
         world.process('middle on x', ['x']).publish('m')
 
         reader = world.process('reader', ['a', 'b'])
-        self.assertEqual(reader.nodes()['x'], 3)
+        self.assertEqual(reader.nodes()['x'], 1)
         self.assertNotIn('z', reader.nodes())
-        self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 100)], ('m', 100, 0))
+        self.assertEqual(reader.subscriptions['a'].current_dependency_revisions[('m', 1)], ('m', 1, 0))
 
 
 if __name__ == '__main__':

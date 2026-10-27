@@ -108,8 +108,8 @@ def find_consistent_cut(
         return (revision, right_revision) if leading_is_left else (left_revision, revision)
 
     # 3. Walk actual revisions newest first, respecting proposed/current bounds.
-    # Revision zero links to the preceding sparse version and its maximum count;
-    # only counts within a version are consecutive.
+    # Revision zero links to the preceding version. Resolve that version's own head;
+    # it can receive new revisions after its successor has been published.
     #
     # Each root candidate searches intermediate revisions within fixed data
     # versions. Expanded descendants are not scalar ordering keys for roots
@@ -273,8 +273,8 @@ def _revisions_backwards(
     revision: DataRevisionId, cache: DataCache, floor: DataRevisionId | None,
     search: RevisionSearch, constraints=None,
 ) -> Iterator[DataRevisionId]:
-    # Counts are consecutive within a version. Version IDs are sparse and must
-    # be reached through revision-zero links, including the prior maximum count.
+    # Counts are consecutive within a version. Revision-zero links retain the
+    # preceding version when crossing a boundary; its own head supplies the count.
     for version, maximum_count in _version_bounds(revision, cache, floor):
         minimum_count = floor[2] if floor is not None and version == floor[1] else 0
         # Reaching the subscribed parent uses the same zero-count probe and
@@ -316,4 +316,4 @@ def _version_bounds(
             return
         if previous[0] >= version:
             raise ValueError("Revision-zero history must point to an older version")
-        version, maximum_count = previous
+        _, version, maximum_count = cache.get_latest_revision((data_id, previous[0]))

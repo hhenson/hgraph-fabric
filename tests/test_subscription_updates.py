@@ -32,14 +32,24 @@ class UpdateOnlyCache(DataCache):
     def load_version(self, version_id):
         raise KeyError(version_id)
 
-    def write_version(self, version_id, data):
+    def load_latest_revision(self, version_id):
+        candidates = [r for r in self._revisions if r[:2] == version_id]
+        if not candidates:
+            raise KeyError(version_id)
+        return max(candidates)
+
+    def write_version(self, version_id, data, details):
         raise AssertionError("Update notifications must not write data")
 
     def write_revision(self, revision_id, details):
         raise AssertionError("Update notifications must not write revisions")
 
-    def write_latest(self, data_id, details):
+    def write_latest_version(self, version_id):
         raise AssertionError("Update notifications must not write latest")
+
+    def write_latest_revision(self, revision_id):
+        raise AssertionError("Read-only fixture must not write heads")
+
 
 
 class SubscriptionUpdateTests(unittest.TestCase):

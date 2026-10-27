@@ -253,7 +253,7 @@ class DataSubscriptionManager:
                 del self._historical_conflicts[root]
                 continue
             retained = {version: revision for version, revision in versions.items()
-                        if self._conflicts.get(version) and self._revision_may_advance(version, revision)}
+                        if self._conflicts.get(version)}
             if retained:
                 self._historical_conflicts[root] = retained
                 historical_versions.update(retained)
@@ -269,27 +269,8 @@ class DataSubscriptionManager:
                 if version[0] in self._subscriptions:
                     continue  # Root notifications already reach the manager.
                 observed = self._cache.get_latest_revision(version)
-                if not self._revision_may_advance(version, observed):
-                    continue
                 self._historical_conflicts.setdefault(root, {})[version] = observed
                 self._conflicts.setdefault(version, set()).update(sub.data_id for sub in pair)
-
-    def _revision_may_advance(self, version, observed):
-        # A successor's immutable revision-zero link seals the old version's
-        # maximum count. Keep a watch if that final count is not yet observed:
-        # its notification may arrive after the successor's notification.
-        head = self._cache.peek_latest(version[0])
-        while head is not None and head[1] > version[1]:
-            record = self._cache.peek_revision((head[0], head[1], 0))
-            if record is None or record.previous_revision is None:
-                break  # No cached proof that this version is complete.
-            previous = record.previous_revision
-            if previous[0] == version[1]:
-                return previous[1] > observed[2]
-            if previous[0] >= head[1]:
-                break  # History validation remains the loader's responsibility.
-            head = (head[0], *previous)
-        return True
 
     def _prepare_proposals(
         self, subscriptions: tuple[DataSubscriptionGraph, ...], *, updating: bool = False,

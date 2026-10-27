@@ -90,7 +90,7 @@ class HgraphAdaptorTests(unittest.TestCase):
             collect(subscribe[Prices]("prices"), version_id("prices"))
 
         self.run_graph(app)
-        self.assertEqual(observed, [({"price": [1]}, ("prices", 321))] * 2)
+        self.assertEqual(observed, [({"price": [1]}, ("prices", 1))] * 2)
         self.assertEqual((self.transport.starts, self.transport.stops), (1, 1))
         self.assertEqual(self.transport.sent, [])
 
@@ -185,7 +185,7 @@ class HgraphAdaptorTests(unittest.TestCase):
             collect(subscribe[Prices]("a"), subscribe[Prices]("b"), version_id("a"))
 
         self.run_graph(app, [pa.table({"price": [2]})],
-                       [None, None, pa.table({"price": [3]})], [("x", 7)])
+                       [None, None, pa.table({"price": [3]})], [("x", 2)])
         self.assertEqual([(a, b) for a, b, _ in observed], [(1, 1), (2, 3)])
         self.assertEqual(observed[-1][2], self.cache.latest("a")[:2])
 
@@ -263,7 +263,7 @@ class HgraphAdaptorTests(unittest.TestCase):
             return subscribe[Prices]("output")
         results = self.run_graph(app)
         self.assertEqual([as_arrow_table(v)["price"][0].as_py() for v in results if v is not None], [0, 5])
-        self.assertEqual(self.transport.sent[0].dependencies, (("input", 50),))
+        self.assertEqual(self.transport.sent[0].dependencies, (("input", 1),))
 
     def test_two_graph_runs_create_fresh_sessions_and_close_them(self):
         seed(self.cache, "prices")
@@ -322,8 +322,8 @@ class HgraphAdaptorTests(unittest.TestCase):
             publish(b, "b", (dep_b,))
             collect(version_id("a"), version_id("b"))
         self.run_graph(app, [pa.table({"price": [2]})], [pa.table({"price": [3]})],
-                       [("x", 1), None, None, ("x", 7)],
-                       [("x", 1), None, None, None, None, ("x", 7)])
+                       [("x", 1), None, None, ("x", 2)],
+                       [("x", 1), None, None, None, None, ("x", 2)])
         self.assertEqual(self.cache.latest("a"), ("a", self.cache.latest("a")[1], 1))
         self.assertEqual(self.cache.latest("b"), ("b", self.cache.latest("b")[1], 1))
         self.assertEqual(observed[-1], (self.cache.latest("a")[:2], self.cache.latest("b")[:2]))
@@ -416,7 +416,7 @@ class HgraphAdaptorTests(unittest.TestCase):
             key = ids()
             collect(subscribe[Prices](key), version_id(key))
         self.run_graph(app)
-        self.assertEqual(observed, [(1, ("a", 100)), (2, ("b", 200))])
+        self.assertEqual(observed, [(1, ("a", 1)), (2, ("b", 1))])
         self.assertEqual((self.transport.starts, self.transport.stops), (1, 1))
 
     def test_mapped_components_share_registered_services(self):
@@ -453,11 +453,11 @@ class HgraphAdaptorTests(unittest.TestCase):
         writing, release = Event(), Event()
         original = self.cache.write_version
         graph_progress = []
-        def slow_write(version, data):
+        def slow_write(version, data, details):
             writing.set()
             if not release.wait(2):
                 raise TimeoutError("graph blocked on storage")
-            original(version, data)
+            original(version, data, details)
         @hg.sink_node
         def unblock(tick: hg.TS[bool]):
             if writing.is_set():
@@ -520,7 +520,7 @@ class HgraphAdaptorTests(unittest.TestCase):
 
         self.run_graph(app)
         self.assertEqual(len(self.transport.sent), 1)
-        self.assertEqual(self.transport.sent[0].dependencies, (("source", 101),))
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 1),))
         self.assertEqual(self.transport.sent[0].weak_dependencies, ())
 
     def test_automatic_source_publication_has_no_dependencies(self):
@@ -535,7 +535,7 @@ class HgraphAdaptorTests(unittest.TestCase):
 
     def test_automatic_dependencies_include_direct_version_subscriptions(self):
         seed(self.cache, "ancestor", version=99)
-        seed(self.cache, "source", version=101, dependencies=(("ancestor", 99),))
+        seed(self.cache, "source", version=101, dependencies=(("ancestor", 1),))
         seed(self.cache, "unused", version=202)
 
         @hg.compute_node
@@ -550,9 +550,9 @@ class HgraphAdaptorTests(unittest.TestCase):
 
         self.run_graph(app)
         self.assertEqual(len(self.transport.sent), 1)
-        self.assertEqual(self.transport.sent[0].dependencies, (("source", 101),))
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 1),))
         self.assertEqual(self.transport.sent[0].weak_dependencies, ())
-        self.assertEqual(self.cache.get_version(self.cache.latest("output")[:2]).to_pydict(), {"price": [101]})
+        self.assertEqual(self.cache.get_version(self.cache.latest("output")[:2]).to_pydict(), {"price": [1]})
 
     def test_direct_version_subscription_is_weak_on_a_passive_path(self):
         seed(self.cache, "source", version=101)
@@ -578,8 +578,8 @@ class HgraphAdaptorTests(unittest.TestCase):
         self.run_graph(app)
         self.assertTrue(observed)
         self.assertEqual(len(self.transport.sent), 1)
-        self.assertEqual(self.transport.sent[0].dependencies, (("trigger", 100),))
-        self.assertEqual(self.transport.sent[0].weak_dependencies, (("source", 101),))
+        self.assertEqual(self.transport.sent[0].dependencies, (("trigger", 1),))
+        self.assertEqual(self.transport.sent[0].weak_dependencies, (("source", 1),))
 
     def test_active_version_subscription_wins_over_passive_frame_subscription(self):
         seed(self.cache, "source", version=101)
@@ -601,7 +601,7 @@ class HgraphAdaptorTests(unittest.TestCase):
             publish(stamp(version_id(source_key(frame)), frame), "output")
 
         self.run_graph(app)
-        self.assertEqual(self.transport.sent[0].dependencies, (("source", 101),))
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 1),))
         self.assertEqual(self.transport.sent[0].weak_dependencies, ())
 
     def test_direct_version_inference_rejects_another_service_path(self):
@@ -754,9 +754,9 @@ class HgraphAdaptorTests(unittest.TestCase):
         self.assertEqual(observed["initial_count"], 1)
         self.assertEqual(observed["checked"], 1)
         self.assertEqual(len(self.transport.sent), 2)
-        self.assertEqual(self.transport.sent[0].weak_dependencies, (("passive", 100),))
-        self.assertEqual(self.transport.sent[-1].dependencies, (("active", 200),))
-        self.assertEqual(self.transport.sent[-1].weak_dependencies, (("passive", 200),))
+        self.assertEqual(self.transport.sent[0].weak_dependencies, (("passive", 1),))
+        self.assertEqual(self.transport.sent[-1].dependencies, (("active", 2),))
+        self.assertEqual(self.transport.sent[-1].weak_dependencies, (("passive", 2),))
 
     def test_automatic_active_path_wins_over_a_transitive_passive_path(self):
         seed(self.cache, "a", version=101)
@@ -777,7 +777,7 @@ class HgraphAdaptorTests(unittest.TestCase):
             publish(join(sample(b, a), a), "output")
 
         self.run_graph(app)
-        self.assertEqual(self.transport.sent[-1].dependencies, (("a", 101), ("b", 202)))
+        self.assertEqual(self.transport.sent[-1].dependencies, (("a", 1), ("b", 1)))
         self.assertEqual(self.transport.sent[-1].weak_dependencies, ())
 
     def test_automatic_versions_publish_dependency_revisions_when_frames_are_suppressed(self):
@@ -807,7 +807,7 @@ class HgraphAdaptorTests(unittest.TestCase):
         first, second = self.transport.sent
         self.assertEqual((first.id, first.revision[0]), (second.id, second.revision[0]))
         self.assertEqual(second.revision[1], 1)
-        self.assertEqual(second.dependencies, (("source", 200),))
+        self.assertEqual(second.dependencies, (("source", 2),))
 
     def test_explicit_dependencies_disable_automatic_discovery(self):
         seed(self.cache, "source", version=100)
@@ -826,17 +826,17 @@ class HgraphAdaptorTests(unittest.TestCase):
             hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
             publish(subscribe[Prices](id), "output")
         self.run_graph(app, ["a", None, "b"])
-        self.assertEqual(self.transport.sent[-1].dependencies, (("b", 202),))
+        self.assertEqual(self.transport.sent[-1].dependencies, (("b", 1),))
 
     def test_automatic_discovery_stops_at_subscription_boundaries(self):
         seed(self.cache, "ancestor", version=100)
-        seed(self.cache, "source", version=200, dependencies=(("ancestor", 100),))
+        seed(self.cache, "source", version=200, dependencies=(("ancestor", 1),))
         @hg.graph
         def app():
             hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
             publish(subscribe[Prices]("source"), "output")
         self.run_graph(app)
-        self.assertEqual(self.transport.sent[0].dependencies, (("source", 200),))
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 1),))
 
     def test_automatic_dependencies_reject_unresolved_compiled_inputs(self):
         @hg.compute_node
@@ -860,7 +860,7 @@ class HgraphAdaptorTests(unittest.TestCase):
             hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
             publish(subscribe[Prices]("source"), "output", weak_dependencies=(weak,))
         self.run_graph(app, [("reference", 1), None, ("reference", 2)])
-        self.assertEqual(self.transport.sent[-1].dependencies, (("source", 100),))
+        self.assertEqual(self.transport.sent[-1].dependencies, (("source", 1),))
         self.assertEqual(self.transport.sent[-1].weak_dependencies, (("reference", 2),))
 
     def test_explicit_weak_alias_of_automatic_strong_dependency_is_removed(self):
@@ -870,7 +870,7 @@ class HgraphAdaptorTests(unittest.TestCase):
             hg.register_service("fabric", fabric_service, cache=self.cache, transport=self.transport, poll_interval=.001)
             publish(subscribe[Prices]("source"), "output", weak_dependencies=(version_id("source"),))
         self.run_graph(app)
-        self.assertEqual(self.transport.sent[-1].dependencies, (("source", 100),))
+        self.assertEqual(self.transport.sent[-1].dependencies, (("source", 1),))
         self.assertEqual(self.transport.sent[-1].weak_dependencies, ())
 
     def test_automatic_dependencies_preserve_activity_after_error_capture(self):
@@ -885,5 +885,5 @@ class HgraphAdaptorTests(unittest.TestCase):
             hg.exception_time_series(output)
             publish(output, "output")
         self.run_graph(app)
-        self.assertEqual(self.transport.sent[0].dependencies, (("source", 100),))
+        self.assertEqual(self.transport.sent[0].dependencies, (("source", 1),))
         self.assertEqual(self.transport.sent[0].weak_dependencies, ())

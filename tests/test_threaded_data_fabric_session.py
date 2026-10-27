@@ -77,6 +77,19 @@ class ThreadedSessionTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "closed"):
             publish(table({"value": [2]}), id="a")
 
+    def test_worker_can_publish_an_explicit_older_version(self):
+        original, _ = self.seed()
+        self.cache.write(table({"value": [1]}), id="a")
+        with run_data_fabric_session(self.cache, self.transport, lambda delta, publish: None,
+                                    poll_interval=0.001) as publish:
+            returned, update = publish(id="a", version=1, expected_revision=0,
+                                       weak_dependencies=(("audit", 1),))
+            self.assertIs(returned, original)
+            self.assertEqual(update.revision, (1, 1))
+        self.assertEqual(self.cache.latest("a"), ("a", 2, 0))
+        self.assertEqual(self.cache.get_latest_revision(("a", 1)), ("a", 1, 1))
+        self.assertEqual(sum(method == "send" for method, _ in self.transport.calls), 1)
+
     def test_callback_can_publish_without_deadlock(self):
         self.seed()
         changes = Queue()

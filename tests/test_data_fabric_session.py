@@ -15,9 +15,9 @@ from test_data_cache import MemoryDataCache
 AS_OF = datetime(2026, 10, 21, tzinfo=UTC)
 
 
-def publish(session, data_id, version, dependencies=()):
+def publish(session, data_id, value, dependencies=()):
     return session.publish(
-        table({"value": [version]}, metadata={b"version": str(version).encode()}),
+        table({"value": [value]}),
         id=data_id, dependencies=dependencies, as_of=AS_OF,
     )
 
@@ -46,22 +46,22 @@ class DataFabricSessionTests(unittest.TestCase):
         sub = self.session.add_subscription("a")
         self.session.get_consistent_cut()
         data, update = publish(self.session, "a", 200, (("source", 1),))
-        self.assertIs(self.cache.peek_version(("a", 200)), data)
+        self.assertIs(self.cache.peek_version(("a", 2)), data)
         self.assertEqual(update.dependencies, (("source", 1),))
         self.assertEqual(update.as_of, AS_OF)
-        self.assertEqual(sub.current_revision, ("a", 100, 0))
+        self.assertEqual(sub.current_revision, ("a", 1, 0))
         advanced = self.session.apply_update(update)
         self.assertIs(advanced["a"], data)
-        self.assertEqual(sub.current_revision, ("a", 200, 0))
+        self.assertEqual(sub.current_revision, ("a", 2, 0))
 
     def test_publish_uses_metadata_and_forwards_weak_dependencies(self):
         original = table({"value": []}, metadata={
             b"id": b"a", b"version": b"7", b"as_of": AS_OF.isoformat().encode(),
         })
         data, update = self.session.publish(original, weak_dependencies=(("reference", 3),))
-        self.assertEqual(data.schema.metadata, original.schema.metadata)
+        self.assertEqual(data.schema.metadata, original.schema.metadata | {b"version": b"1"})
         self.assertEqual(update.id, "a")
-        self.assertEqual(update.revision, (7, 0))
+        self.assertEqual(update.revision, (1, 0))
         self.assertEqual(update.as_of, AS_OF)
         self.assertEqual(update.dependencies, ())
         self.assertEqual(update.weak_dependencies, (("reference", 3),))
@@ -82,7 +82,7 @@ class DataFabricSessionTests(unittest.TestCase):
         self.assertIs(cut["a"], a100)
         self.assertIs(cut["b"], b100)
         self.assertEqual({key for kind, key in reader.loads if kind == "data"},
-                         {("a", 100), ("b", 100)})
+                         {("a", 1), ("b", 1)})
 
     def test_remote_updates_load_only_advanced_tables_and_release_waiting_peer(self):
         publish(self.session, "x", 1)
@@ -106,17 +106,17 @@ class DataFabricSessionTests(unittest.TestCase):
         self.assertIs(advanced["a"], a)
         self.assertIs(advanced["b"], b)
         self.assertEqual({key for kind, key in self.cache.loads if kind == "data"},
-                         {("a", 200), ("b", 200)})
+                         {("a", 2), ("b", 2)})
 
     def test_revision_only_and_duplicate_updates_do_not_return_data(self):
         _, update = publish(self.session, "a", 100)
         sub = self.session.add_subscription("a")
         self.session.get_consistent_cut()
-        revision = replace(update, revision=(100, 1), previous_revision=None)
+        revision = replace(update, revision=(1, 1), previous_revision=None)
         with patch.object(self.cache, "get_version", side_effect=AssertionError("No new table")):
             self.assertEqual(self.session.apply_update(revision), {})
             self.assertEqual(self.session.apply_update(revision), {})
-        self.assertEqual(sub.current_revision, ("a", 100, 1))
+        self.assertEqual(sub.current_revision, ("a", 1, 1))
 
     def test_empty_session_and_unsubscribed_update_return_no_tables(self):
         self.assertEqual(self.session.get_consistent_cut(), {})
@@ -181,8 +181,8 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         self.assertEqual(set(result), {"a", "b"})
         self.assertIs(result["a"], a100)
         self.assertIs(result["b"], b100)
-        self.assertEqual(a.current_revision, ("a", 100, 0))
-        self.assertEqual(b.current_revision, ("b", 100, 0))
+        self.assertEqual(a.current_revision, ("a", 1, 0))
+        self.assertEqual(b.current_revision, ("b", 1, 0))
         self.transport.poll.assert_not_called()
 
     def test_duplicate_registration_does_not_repeat_initialization(self):
@@ -265,10 +265,10 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         self.session.get_consistent_cut()
         data, update = publish(self.session, "a", 200)
         self.transport.send.assert_called_with(update)
-        self.assertEqual(sub.current_revision, ("a", 100, 0))
+        self.assertEqual(sub.current_revision, ("a", 1, 0))
         result = self.session.poll(0)
         self.assertIs(result["a"], data)
-        self.assertEqual(sub.current_revision, ("a", 200, 0))
+        self.assertEqual(sub.current_revision, ("a", 2, 0))
         self.assertEqual(self.session.poll(0), {})
 
     def test_poll_consumes_one_remote_update_without_sending_it_again(self):
@@ -319,7 +319,7 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         _, initial = publish(publisher, "a", 100)
         self.session.add_subscription("a")
         self.session.get_consistent_cut()
-        revision = replace(initial, revision=(100, 1), previous_revision=None)
+        revision = replace(initial, revision=(1, 1), previous_revision=None)
         data, update = publish(publisher, "a", 200)
         self.transport.poll.side_effect = [revision, update]
         result = self.session.poll()
@@ -354,7 +354,7 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         self.assertEqual(self.cache.writes, [])
         returned, update = self.session.publish(id="a", weak_dependencies=(("reference", 1),), as_of=AS_OF)
         self.assertIs(returned, data)
-        self.assertEqual(update.revision, (100, 1))
+        self.assertEqual(update.revision, (1, 1))
         self.transport.send.assert_called_once_with(update)
         self.transport.send.reset_mock()
         self.session.publish(id="a", weak_dependencies=(("reference", 1),))
@@ -378,5 +378,5 @@ class PollingDataFabricSessionTests(unittest.TestCase):
         _, update = self.session.publish(id="a", dependencies=(("source", 2),))
         self.transport.poll.return_value = update
         self.assertEqual(self.session.poll(0), {})
-        self.assertEqual(sub.current_revision, ("a", 100, 1))
+        self.assertEqual(sub.current_revision, ("a", 1, 1))
         self.assertEqual(sub.current(self.cache).get_data_version_id("source"), ("source", 2))
