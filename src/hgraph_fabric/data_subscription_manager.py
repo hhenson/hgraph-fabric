@@ -1,9 +1,10 @@
 from collections import deque
 from collections.abc import Iterable
 
-from .consistent_cut import NoConsistentCutError, find_consistent_cut
+from .consistent_cut import NoConsistentCutError, find_consistent_cut, _revisions_backwards
 from .data_cache import DataCache
-from .data_structures import DataId, DataRevisionId, DataUpdateDetails, DataVersionId
+from .dependency_resolution import RevisionSearch
+from .data_structures import DataId, DataRevisionId, DataUpdateDetails, DataVersionId, is_no_data, no_data_revision
 from .data_subscription_graph import DataSubscriptionGraph, InconsistentDependencyError
 
 
@@ -26,11 +27,14 @@ class DataSubscriptionManager:
     def add_subscription(self, data_id: DataId) -> DataSubscriptionGraph:
         if data_id not in self._subscriptions:
             subscription = DataSubscriptionGraph(data_id)
-            subscription.latest_revision = self._cache.latest(data_id)
+            try:
+                subscription.latest_revision = self._cache.latest(data_id)
+            except KeyError:
+                subscription.latest_revision = no_data_revision(data_id)
             try:
                 subscription.latest(self._cache)
             except InconsistentDependencyError:
-                pass  # Register both paths; initialization waits for a cut.
+                pass  # Register both paths before resolving the initial cut.
             self._index_dependencies(subscription)
             self._subscriptions[data_id] = subscription
         return self._subscriptions[data_id]
@@ -41,7 +45,7 @@ class DataSubscriptionManager:
 
     @property
     def is_initialized(self) -> bool:
-        """Whether every registered subscription has a current revision."""
+        """Whether every subscription has a committed selection, including no-data."""
         return all(sub.current_revision is not None for sub in self._subscriptions.values())
 
     def apply_update(self, update: DataUpdateDetails) -> set[DataVersionId]:
@@ -127,12 +131,12 @@ class DataSubscriptionManager:
         self._pending_cuts.pop(subscription.data_id, None)
         if established and subscription.current_revision == subscription.latest_revision:
             return set()  # This root cannot drive an advance.
-        self._prepare_proposals(subscriptions, updating=established)
         updated = subscriptions.index(subscription)
         try:
+            self._prepare_proposals(subscriptions, updating=established)
             if not established:
                 # Without a validated existing cut there is no stable set to reuse.
-                accepted = self._stabilize(subscriptions, [], list(range(len(subscriptions))), updated)
+                accepted = self._stabilize(subscriptions, [], list(range(len(subscriptions))))
             else:
                 accepted = self._advance_cut(subscriptions, updated)
             if not accepted:
@@ -148,7 +152,8 @@ class DataSubscriptionManager:
         return {
             sub.current_revision[:2]
             for key, sub in self._subscriptions.items()
-            if current[key] is None or sub.current_revision[1] > current[key][1]
+            if not is_no_data(sub.current_revision)
+            and (current[key] is None or sub.current_revision[1] > current[key][1])
         }
 
     def _dependency_versions(self, sub, current_revision, choices):
@@ -157,7 +162,7 @@ class DataSubscriptionManager:
         visited = set()
         while pending:
             revision = pending.pop()
-            if revision in visited:
+            if revision in visited or is_no_data(revision):
                 continue
             visited.add(revision)
             # Sibling dependency revisions arrive separately. The index must
@@ -216,8 +221,8 @@ class DataSubscriptionManager:
     def get_consistent_cut(self) -> set[DataVersionId]:
         """Downgrade proposals from latest, then commit the complete cut."""
         subscriptions = tuple(self._subscriptions.values())
-        self._prepare_proposals(subscriptions)
         try:
+            self._prepare_proposals(subscriptions, updating=self.is_initialized)
             self._stabilize(subscriptions, [], list(range(len(subscriptions))))
             self._commit_proposals(subscriptions)
         except InconsistentDependencyError as error:
@@ -229,7 +234,7 @@ class DataSubscriptionManager:
             # Keep the already delivered selections until a complete cut can
             # be accepted. No partial proposal has been committed.
         self.cleanup_conflicts()
-        return {sub.current_revision[:2] for sub in subscriptions}
+        return {sub.current_revision[:2] for sub in subscriptions if not is_no_data(sub.current_revision)}
 
     def cleanup_conflicts(self) -> None:
         """Retire resolved roots and paths outside admissible candidate histories.
@@ -289,6 +294,29 @@ class DataSubscriptionManager:
                         for version, revision in sub.current_dependency_revisions.items())
             )
             sub.reset_proposal(reuse_current=reuse_current)
+            try:
+                sub.proposal(self._cache)
+            except InconsistentDependencyError as error:
+                # Even one subscribed root can have conflicting internal paths.
+                # Try its retained history before the no-data boundary; updates
+                # must never cross an already committed published root.
+                search = RevisionSearch(self._cache)
+                try:
+                    for revision in _revisions_backwards(
+                        sub.proposed_revision, self._cache, sub.current_revision, search,
+                        include_no_data=True,
+                    ):
+                        resolved = next(search.solutions(revision), None)
+                        if resolved is not None:
+                            sub.proposed_revision = revision
+                            # This is the starting candidate, not a pairwise
+                            # agreement imposing intermediate count ceilings.
+                            sub._proposed_resolution = resolved
+                            break
+                    else:
+                        raise NoConsistentCutError("No internally consistent root within update bounds")
+                finally:
+                    self._pending_cuts[sub.data_id] = error.dependencies | search.dependencies
 
     def _commit_proposals(self, subscriptions: tuple[DataSubscriptionGraph, ...]) -> None:
         # Even a single subscription must expand its full proposed tree. Do all
@@ -306,7 +334,9 @@ class DataSubscriptionManager:
             self._set_dependency_index(sub, dependencies)
         self._consistent_revisions = {sub.data_id: sub.current_revision for sub in subscriptions}
         self._dirty_subscriptions.clear()
-        self._pending_cuts.clear()
+        for sub in subscriptions:
+            if sub.current_revision == sub.latest_revision:
+                self._pending_cuts.pop(sub.data_id, None)
 
     def _rejected(self, subscriptions: tuple[DataSubscriptionGraph, ...], updated: int | None) -> bool:
         if updated is None:
@@ -328,14 +358,11 @@ class DataSubscriptionManager:
         before_states = tuple(r.signature for r in before_resolutions)
         conflict_paths = {}
         try:
-            if updated is None:
-                revisions = find_consistent_cut(left, right, self._cache, conflict_paths=conflict_paths)
-            else:
-                revisions = find_consistent_cut(
-                    left, right, self._cache,
-                    lower_bounds=(left.current_revision, right.current_revision),
-                    conflict_paths=conflict_paths,
-                )
+            revisions = find_consistent_cut(
+                left, right, self._cache,
+                lower_bounds=(left.current_revision, right.current_revision),
+                conflict_paths=conflict_paths,
+            )
         except NoConsistentCutError:
             self._track_conflicts(left, right)
             raise

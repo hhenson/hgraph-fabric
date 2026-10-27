@@ -3,7 +3,7 @@ from collections import deque
 from .data_cache import DataCache
 from .data_graph import DataEdgeGraph
 from .dependency_resolution import DependencyResolution, RevisionSearch
-from .data_structures import DataId, DataRevisionId, DataVersionId
+from .data_structures import DataId, DataRevisionId, DataVersionId, is_no_data
 
 
 class InconsistentDependencyError(ValueError):
@@ -154,6 +154,8 @@ class DataSubscriptionGraph:
     ) -> DataEdgeGraph:
         if revision_id[0] != self.data_id:
             raise ValueError("Revision belongs to a different data ID")
+        if is_no_data(revision_id):
+            return DataEdgeGraph()
         if revision_id in self._revision_graphs:
             dependencies = self._dependency_revisions.get(revision_id, {})
             if all(cache.get_latest_revision(key) == value for key, value in dependencies.items()):

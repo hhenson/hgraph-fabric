@@ -57,6 +57,17 @@ class StorageContract:
                 loaded = self.cache().get_version((str(index), update.revision[0]))
                 self.assertTrue(loaded.equals(table, check_metadata=True))
 
+    def test_no_data_selection_then_first_publication_uses_shared_store(self):
+        reader, writer = self.cache(), self.cache()
+        session = DataFabricSession(reader)
+        sub = session.add_subscription("prices")
+        self.assertEqual(session.get_consistent_cut(), {})
+        self.assertEqual(sub.current_revision, ("prices", 0, 0))
+        data, update = self.publish(writer)
+        self.assertTrue(session.apply_update(update)["prices"].equals(data, check_metadata=True))
+        self.assertEqual(sub.current_revision, ("prices", 1, 0))
+        self.assertEqual(session.apply_update(update), {})
+
     def test_table_larger_than_default_upload_chunk_round_trips(self):
         data = pa.table({"blob": [b"x" * (6 * 1024 * 1024)]})
         table, update = self.cache().write(data, id="large", as_of=AS_OF)

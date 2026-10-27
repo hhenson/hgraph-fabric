@@ -34,6 +34,23 @@ consistent are proposals copied to current. Before committing, every proposed
 full tree is loaded, including a single subscription with no pair comparisons.
 Failed searches or tree loads leave current intact.
 
+Before its first publication, a subscription can select **no-data**. If retained
+published histories cannot agree, initialisation can also select no-data for a
+blocked branch while releasing independent values. Published candidates are
+preferred to no-data, including compatible records with omitted dependencies.
+The in-memory marker `no_data_revision(id)` is `(id, 0, 0)`; it is never stored
+or loaded as a publication. `None` still means the subscription has not been
+initialised. A no-data root retains its ID in comparisons and cannot satisfy a
+strong reference to a published version of that dataset.
+
+Cuts and change sets contain only published `DataVersionId` values, so a session
+does not return a table for no-data. A published empty table remains a value.
+Notifications can advance a no-data selection, including dependency revisions
+that resolve an internal conflict. Once a published selection is committed,
+subsequent cut requests, updates and added subscriptions cannot regress it to
+an older publication or no-data. Missing referenced metadata is an integrity
+error, not a no-data state.
+
 Cache writes and notifications to every associated subscription manager are
 coordinated. Deliver an update to all associated managers before starting another
 cut operation or reading trees between those notifications.
@@ -340,13 +357,12 @@ to start on entry and stop on exit, including when the block raises an exception
 Its `publish` persists first, then sends the update metadata. Dependency-only
 calls with unchanged dependency tuples return existing details without sending.
 This also applies to the threaded helper's publish callable.
-If any registered subscription has no current revision, `poll` first initializes
-and returns the full consistent cut without receiving a message. This also applies
-to subscriptions added after polling has begun; the whole cut is returned because
-adding a root can change the versions selected for existing roots.
-If no initial consistent cut is available, polling continues receiving within
-the remaining timeout so a later publication can establish it. Storage and
-malformed metadata errors still propagate.
+If any registered subscription is uninitialised, `poll` first establishes its
+selection and returns the available tables from the full cut. This also applies
+to subscriptions added after polling has begun; established selections remain
+lower bounds. An all-no-data cut is initialised but supplies no tables, so polling
+continues receiving within the remaining timeout. Storage and malformed metadata
+errors still propagate.
 `poll` receives and applies notifications until subscribed data advances or its
 timeout expires. It returns the advanced tables, or `{}` on expiry. Timeouts are
 seconds and cover the whole call, including notifications that yield no changes;

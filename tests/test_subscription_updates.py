@@ -373,7 +373,7 @@ class SubscriptionUpdateTests(unittest.TestCase):
             self.manager.apply_update(self.update("b", 100, 1, dependencies=(("x", 1),))), set()
         )
         self.assertEqual(a.current_revision, ("a", 200, 0))
-        self.assertIsNone(b.current_revision)
+        self.assertEqual(b.current_revision, ("b", 0, 0))
 
     def test_failed_comparison_retains_update_and_allows_retry(self):
         a, b = self.seed_pair()

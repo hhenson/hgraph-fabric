@@ -142,7 +142,7 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         self.manager.add_subscriptions(["a", "b"])
         self.assertEqual(self.manager.get_consistent_cut(), {("a", 1), ("b", 1)})
 
-    def test_failed_search_preserves_current_selections(self):
+    def test_new_subscription_waits_at_no_data_without_regressing_current(self):
         self.add_revision("source", 1)
         self.add_revision("source", 2)
         self.add_revision("a", 2, dependencies=(("source", 2),))
@@ -150,10 +150,9 @@ class DataSubscriptionManagerTests(unittest.TestCase):
         self.assertEqual(self.manager.get_consistent_cut(), {("a", 2)})
         self.add_revision("b", 1, dependencies=(("source", 1),))
         b = self.manager.add_subscription("b")
-        with self.assertRaises(LookupError):
-            self.manager.get_consistent_cut()
+        self.assertEqual(self.manager.get_consistent_cut(), {("a", 2)})
         self.assertEqual(a.current_revision, ("a", 2, 0))
-        self.assertIsNone(b.current_revision)
+        self.assertEqual(b.current_revision, ("b", 0, 0))
 
     def test_existing_item_rollback_stabilizes_prefix_before_next_insertion(self):
         for data_id in ("x", "y"):
@@ -251,7 +250,8 @@ class DataSubscriptionManagerTests(unittest.TestCase):
 
         def compare(left, right, cache, **kwargs):
             if right.data_id == "c":
-                self.assertEqual(a.proposed_revision, ("a", 100, 0))
+                self.assertEqual(a.proposed_revision, ("a", 100, 1))
+                self.assertEqual(self.manager._subscriptions["b"].proposed_revision, ("b", 0, 0))
                 self.assertEqual(a.current_revision, ("a", 100, 1))
                 raise OSError("Unavailable history")
             return find_consistent_cut(left, right, cache, **kwargs)

@@ -109,9 +109,11 @@ class InconsistentDependencyPollingTests(unittest.TestCase):
                     newer, update = publish(self.publisher, "a", 2, (("m", 1), ("n", 1)))
                     if not initialized:
                         root = self.session.add_subscription("a")
+                        # Its retained first publication already forms a cut.
+                        self.assertIs(self.session.poll(0)["a"], old)
                     self.transport.send(update)
                     self.assertEqual(self.session.poll(0), {})
-                    self.assertEqual(root.current_revision, ("a", 1, 0) if initialized else None)
+                    self.assertEqual(root.current_revision, ("a", 1, 0))
 
                     # Latest M has no P path. Search discovers P only through
                     # M/r0, so its notification must wake the failed proposal.
@@ -159,7 +161,7 @@ class InconsistentDependencyPollingTests(unittest.TestCase):
         with self.session:
             root = self.session.add_subscription("root")
             self.assertEqual(self.session.poll(0), {})
-            self.assertIsNone(root.current_revision)
+            self.assertEqual(root.current_revision, ("root", 0, 0))
             _, healed = self.publisher.publish(id="window", dependencies=(("universe", 2),))
             self.transport.send(healed)
             self.assertIs(self.session.poll(0)["root"], initial)

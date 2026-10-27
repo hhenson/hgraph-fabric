@@ -17,6 +17,19 @@ type DataRevisionKey = tuple[DataNamespace, DataRevisionId] # Required by the lo
 type DataIdKey = tuple[DataNamespace, DataId] # Required by the load/store the access data from S3 (for latest)
 
 
+def no_data_revision(data_id: DataId) -> DataRevisionId:
+    """In-memory selection before version 1; never a stored publication.
+
+    None continues to mean uninitialised. The zero marker sorts below every
+    published revision and retains the root ID for strong-dependency checks.
+    """
+    return data_id, 0, 0
+
+
+def is_no_data(revision: DataRevisionId) -> bool:
+    return revision[1] == 0
+
+
 @dataclass(frozen=True)
 class DataRevisionDetails:
     """

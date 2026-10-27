@@ -178,7 +178,7 @@ class MixedRoleReviewTests(unittest.TestCase):
                     result = manager.apply_update(history.add("m", 100, count, dependencies=(("x", 1),)))
                     self.assertEqual(result, set())
                     self.assertEqual({key: manager._subscriptions[key].current_revision for key in old}, old)
-                    self.assertIsNone(sub.current_revision)
+                    self.assertEqual(sub.current_revision, ("m", 0, 0))
                 count += 1
                 result = manager.apply_update(history.add("m", 100, count, dependencies=(("x", 2),)))
                 self.assertEqual(result, {("a", 9000), ("b", 9000), ("m", 100)})
