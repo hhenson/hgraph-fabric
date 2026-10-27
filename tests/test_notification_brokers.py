@@ -61,8 +61,8 @@ class BrokerContract:
             # One notification with no delta: consume it at the transport level
             # so the test need not spend a session timeout per duplicate.
             self.assertEqual(session.apply_update(transport.poll(5)), {})
-            self.assertEqual(sub.latest_revision, ("a", 200, 0))
-            self.assertEqual(sub.current_revision, ("a", 200, 0))
+            self.assertEqual(sub.latest_revision, ("a", 2, 0))
+            self.assertEqual(sub.current_revision, ("a", 2, 0))
 
     def test_image_can_include_a_notification_already_waiting_in_transport(self):
         writer, reader = MemoryDataCache(), MemoryDataCache()
@@ -76,7 +76,7 @@ class BrokerContract:
         sub = session.add_subscription("a")
         self.assertIs(session.poll(0)["a"], expected)
         self.assertEqual(session.apply_update(receiver.poll(5)), {})
-        self.assertEqual(sub.current_revision, ("a", 100, 0))
+        self.assertEqual(sub.current_revision, ("a", 1, 0))
 
     def test_restart_uses_a_fresh_live_boundary(self):
         sender = self.start_transport()
