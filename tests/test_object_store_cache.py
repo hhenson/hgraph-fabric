@@ -498,6 +498,262 @@ class StorageContract:
         self.assertEqual(cut["a"].schema.metadata[b"version"], b"1")
         self.assertEqual(session._subscriptions._subscriptions["a"].current_revision, ("a", 1, 1))
 
+    def test_failure_before_or_after_every_publication_write(self):
+        # An error after put returns models a lost acknowledgement: the caller
+        # sees failure even though that particular object is durably stored.
+        for kind in ("initial", "version", "revision", "older-revision"):
+            commit = 2 if kind in ("initial", "version") else 1
+            writes = 4 if commit == 2 else 2
+            for boundary in range(1, writes + 1):
+                for after in (False, True):
+                    with self.subTest(kind=kind, boundary=boundary, after=after):
+                        namespace = f"failure-{kind}-{boundary}-{int(after)}"
+                        writer = self.cache(namespace)
+                        if kind != "initial":
+                            writer.write(pa.table({"value": [1]}), id="prices", as_of=AS_OF)
+                        if kind == "older-revision":
+                            writer.write(pa.table({"value": [2]}), id="prices", as_of=AS_OF)
+                        target = (2, 0) if kind == "version" else (1, 0 if kind == "initial" else 1)
+                        args = {"id": "prices", "as_of": AS_OF}
+                        if commit == 2:
+                            args["data"] = pa.table({"value": [99]})
+                        else:
+                            args.update(version=1, weak_dependencies=(("audit", 1),))
+                        transport = Mock(spec=DataFabricTransport)
+                        session = PollingDataFabricSession(writer, transport)
+                        put = obstore.put
+                        calls = 0
+                        def interrupted(*args, **kwargs):
+                            nonlocal calls
+                            calls += 1
+                            if calls == boundary and not after:
+                                raise OSError("interrupted before write")
+                            result = put(*args, **kwargs)
+                            if calls == boundary:
+                                raise OSError("acknowledgement lost")
+                            return result
+                        with patch("obstore.put", side_effect=interrupted):
+                            with self.assertRaises(OSError):
+                                session.publish(**args)
+                        self.assertEqual(calls, boundary)
+                        transport.send.assert_not_called()
+                        committed = boundary > commit or (boundary == commit and after)
+                        reader = self.cache(namespace)
+                        if kind == "initial" and not committed:
+                            with self.assertRaises(KeyError):
+                                reader.recover("prices")
+                        else:
+                            updates = reader.recover("prices")
+                            heads = {u.revision[0]: u.revision for u in updates}
+                            expected = {1: (1, 0)}
+                            if kind == "older-revision":
+                                expected[2] = (2, 0)
+                            if committed:
+                                expected[target[0]] = target
+                            self.assertEqual(heads, expected)
+                            for update in updates:
+                                reader.apply_update(update)
+                            self.assertEqual(reader.latest("prices")[1:], max(expected.values()))
+                            if kind == "version" and not committed:
+                                with self.assertRaises(KeyError):
+                                    reader.load_version(("prices", target[0]))
+                            value_version = target[0] if committed else 1
+                            self.assertEqual(reader.load_version(("prices", value_version))["value"].to_pylist(),
+                                             [99] if committed and commit == 2 else [1])
+                        # Restart with an independent cache. An abandoned payload
+                        # consumes no slot. A committed dependency retry is a no-op.
+                        retry_transport = Mock(spec=DataFabricTransport)
+                        retry = PollingDataFabricSession(self.cache(namespace), retry_transport)
+                        _, result = retry.publish(**args)
+                        if commit == 2:
+                            self.assertEqual(result.revision, (target[0] + int(committed), 0))
+                            retry_transport.send.assert_called_once_with(result)
+                        else:
+                            self.assertEqual(result.revision, target)
+                            self.assertEqual(retry_transport.send.call_count, int(not committed))
+
+    def test_suspended_publisher_cannot_regress_heads_after_recovery(self):
+        for kind in ("version", "revision"):
+            with self.subTest(kind=kind):
+                slow, fast, reader = (self.cache(f"resume-{kind}") for _ in range(3))
+                slow.write(pa.table({"value": [1]}), id="prices", as_of=AS_OF)
+                reader.latest("prices")
+                transport = Mock(spec=DataFabricTransport)
+                session = PollingDataFabricSession(slow, transport)
+                method = "write_latest_version" if kind == "version" else "write_latest_revision"
+                persist = getattr(slow, method)
+                recovery = []
+                def resume_after_successor(head):
+                    if kind == "version":
+                        _, newer = fast.write(pa.table({"value": [3]}), id="prices", as_of=AS_OF)
+                    else:
+                        _, newer = fast.write_dependencies("prices", weak_dependencies=(("audit", 2),))
+                    recovery.extend(self.cache(f"resume-{kind}").recover("prices"))
+                    reader.apply_update(newer)
+                    persist(head)  # The delayed hint now overwrites a newer one.
+                with patch.object(slow, method, side_effect=resume_after_successor):
+                    if kind == "version":
+                        _, older = session.publish(pa.table({"value": [2]}), id="prices", as_of=AS_OF)
+                    else:
+                        _, older = session.publish(id="prices", weak_dependencies=(("audit", 1),))
+                reader.apply_update(older)  # Notification delivery can also be reordered.
+                expected = ("prices", 3, 0) if kind == "version" else ("prices", 1, 2)
+                self.assertEqual(reader.latest("prices"), expected)
+                self.assertEqual(self.cache(f"resume-{kind}").load_latest("prices"), expected)
+                self.assertEqual(recovery[-1].revision, expected[1:])
+                transport.send.assert_called_once_with(older)
+                if kind == "version":
+                    for version in (1, 2, 3):
+                        self.assertEqual(reader.get_version(("prices", version))["value"].to_pylist(), [version])
+                else:
+                    self.assertEqual(reader.get_revision(("prices", 1, 1)).weak_dependencies, (("audit", 1),))
+                    self.assertEqual(reader.get_revision(("prices", 1, 2)).weak_dependencies, (("audit", 2),))
+
+    def test_publication_after_recovery_probe_is_visible_on_next_lookup(self):
+        for kind in ("version", "revision"):
+            with self.subTest(kind=kind):
+                namespace = f"recovery-probe-{kind}"
+                writer, recovery, reader = (self.cache(namespace) for _ in range(3))
+                writer.write(pa.table({"value": [1]}), id="prices", as_of=AS_OF)
+                reader.latest("prices")
+                probe = ("prices", 2, 0) if kind == "version" else ("prices", 1, 1)
+                exists = recovery._exists
+                published = []
+                def publish_after_missing(revision):
+                    found = exists(revision)
+                    if revision == probe and not found and not published:
+                        if kind == "version":
+                            _, update = writer.write(pa.table({"value": [2]}), id="prices", as_of=AS_OF)
+                        else:
+                            _, update = writer.write_dependencies("prices", weak_dependencies=(("audit", 1),))
+                        published.append(update)
+                        reader.apply_update(update)
+                    return found
+                with patch.object(recovery, "_exists", side_effect=publish_after_missing):
+                    old_snapshot = recovery.recover("prices")
+                self.assertEqual(len(published), 1)
+                self.assertEqual(old_snapshot[-1].revision, (1, 0))
+                for update in old_snapshot:
+                    reader.apply_update(update)
+                self.assertEqual(reader.latest("prices"), probe)
+                self.assertEqual(self.cache(namespace).load_latest("prices"), probe)
+                self.assertEqual(recovery.recover("prices")[-1], published[0])
+
+    def test_recovery_between_version_and_revision_writes_keeps_both_updates(self):
+        writer, recovery, reader = (self.cache() for _ in range(3))
+        self.publish(writer)
+        reader.latest("prices")
+        load = recovery._revision_head
+        def publish_after_dataset_scan(version, *, rebuild=False):
+            # Recovery has already bounded its dataset scan at version one.
+            _, new_version = self.publish(writer)
+            _, old_revision = writer.write_dependencies("prices", version=1,
+                                                       weak_dependencies=(("audit", 1),))
+            reader.apply_update(new_version)
+            reader.apply_update(old_revision)
+            return load(version, rebuild=rebuild)
+        with patch.object(recovery, "_revision_head", side_effect=publish_after_dataset_scan):
+            snapshot = recovery.recover("prices")
+        self.assertEqual([u.revision for u in snapshot], [(1, 1)])
+        for update in snapshot:
+            reader.apply_update(update)
+        self.assertEqual(reader.latest("prices"), ("prices", 2, 0))
+        self.assertEqual(reader.get_latest_revision(("prices", 1)), ("prices", 1, 1))
+        self.assertEqual([u.revision for u in recovery.recover("prices")], [(1, 1), (2, 0)])
+
+    def test_polling_publisher_pins_version_and_rejects_racing_revision(self):
+        for competing in ("version", "revision"):
+            with self.subTest(competing=competing):
+                first, second = (self.cache(f"selection-race-{competing}") for _ in range(2))
+                self.publish(first)
+                transport = Mock(spec=DataFabricTransport)
+                session = PollingDataFabricSession(first, transport)
+                persist = first.write
+                def interleave(*args, **kwargs):
+                    if competing == "version":
+                        self.publish(second)
+                    else:
+                        second.write_dependencies("prices", weak_dependencies=(("winner", 1),))
+                    return persist(*args, **kwargs)
+                with patch.object(first, "write", side_effect=interleave):
+                    if competing == "version":
+                        _, update = session.publish(id="prices", weak_dependencies=(("audit", 1),))
+                        self.assertEqual(update.revision, (1, 1))
+                        transport.send.assert_called_once_with(update)
+                    else:
+                        with self.assertRaisesRegex(RuntimeError, "revision has changed"):
+                            session.publish(id="prices", weak_dependencies=(("loser", 1),))
+                        transport.send.assert_not_called()
+                fresh = self.cache(f"selection-race-{competing}")
+                if competing == "version":
+                    self.assertEqual(fresh.load_latest("prices"), ("prices", 2, 0))
+                    self.assertEqual(fresh.load_latest_revision(("prices", 1)), ("prices", 1, 1))
+                else:
+                    self.assertEqual(fresh.load_latest("prices"), ("prices", 1, 1))
+                    self.assertEqual(fresh.load_revision(("prices", 1, 1)).weak_dependencies, (("winner", 1),))
+
+    def test_recovery_failure_at_every_pointer_write_can_be_retried(self):
+        for boundary in range(1, 4):  # Dataset hint and two version heads.
+            for after in (False, True):
+                with self.subTest(boundary=boundary, after=after):
+                    namespace = f"recovery-failure-{boundary}-{int(after)}"
+                    writer = self.cache(namespace)
+                    self.publish(writer)
+                    writer.write_dependencies("prices", weak_dependencies=(("audit", 1),))
+                    self.publish(writer)
+                    expected = writer.recover("prices")
+                    paths = [item["path"] for item in obstore.list(writer._store).collect()
+                             if not item["path"].endswith(("/latest.json", "/latest_version.json"))]
+                    immutable = {path: bytes(obstore.get(writer._store, path).bytes()) for path in paths}
+                    put, calls = obstore.put, 0
+                    def interrupted(*args, **kwargs):
+                        nonlocal calls
+                        calls += 1
+                        if calls == boundary and not after:
+                            raise OSError("recovery interrupted")
+                        result = put(*args, **kwargs)
+                        if calls == boundary:
+                            raise OSError("recovery acknowledgement lost")
+                        return result
+                    with patch("obstore.put", side_effect=interrupted):
+                        with self.assertRaises(OSError):
+                            self.cache(namespace).recover("prices")
+                    self.assertEqual(calls, boundary)
+                    self.assertEqual(self.cache(namespace).recover("prices"), expected)
+                    self.assertEqual({path: bytes(obstore.get(writer._store, path).bytes()) for path in paths}, immutable)
+                    self.assertEqual(self.cache(namespace).write_dependencies(
+                        "prices", version=1, weak_dependencies=(("audit", 2),))[1].revision, (1, 2))
+
+    def test_notification_failure_after_commit_is_recovered_for_existing_session(self):
+        for kind in ("version", "revision"):
+            with self.subTest(kind=kind):
+                namespace = f"notification-failure-{kind}"
+                writer, reader = self.cache(namespace), self.cache(namespace)
+                self.publish(writer)
+                consumer = DataFabricSession(reader)
+                consumer.add_subscription("prices")
+                consumer.get_consistent_cut()
+                transport = Mock(spec=DataFabricTransport)
+                transport.send.side_effect = OSError("notification failed")
+                session = PollingDataFabricSession(writer, transport)
+                with self.assertRaises(OSError):
+                    if kind == "version":
+                        session.publish(pa.table({"price": [99]}), id="prices", as_of=AS_OF)
+                    else:
+                        session.publish(id="prices", weak_dependencies=(("audit", 1),))
+                updates = self.cache(namespace).recover("prices")
+                changes = {}
+                for update in updates:
+                    changes.update(consumer.apply_update(update))
+                expected = ("prices", 2, 0) if kind == "version" else ("prices", 1, 1)
+                self.assertEqual(consumer._subscriptions._subscriptions["prices"].current_revision, expected)
+                self.assertEqual(set(changes), {"prices"} if kind == "version" else set())
+                if changes:
+                    self.assertEqual(changes["prices"]["price"].to_pylist(), [99])
+                for update in updates:
+                    self.assertEqual(consumer.apply_update(update), {})
+
+
 
 
 class MemoryStoreTests(StorageContract, unittest.TestCase):
