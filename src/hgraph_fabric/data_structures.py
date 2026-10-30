@@ -8,6 +8,9 @@ type DataVersion = int  # A per-dataset sequence starting at 1
 type DataRevisionCount = int  # A sequence number of revisions for a given version
 type DataRevision = tuple[DataVersion, DataRevisionCount]
 
+MAX_DATA_VERSION = 9_999_999_999_999
+MAX_DATA_REVISION_COUNT = 99_999
+
 type DataVersionId = tuple[DataId, DataVersion]
 type DataRevisionId = tuple[DataId, DataVersion, DataRevisionCount]
 type DependencyEdge = tuple[DataVersionId, DataVersionId]

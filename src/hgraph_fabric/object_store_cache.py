@@ -15,7 +15,7 @@ import pyarrow.parquet as pq
 from .data_cache import DataCache
 from .data_structures import (
     DataId, DataNamespace, DataRevisionDetails, DataRevisionId,
-    DataUpdateDetails, DataVersionId,
+    DataUpdateDetails, DataVersionId, MAX_DATA_VERSION, MAX_DATA_REVISION_COUNT,
 )
 
 
@@ -44,7 +44,7 @@ class ObjectStoreDataCache(DataCache):
 
     def _open_version(self, version_id, key):
         data_id, version = version_id
-        path = self._path(data_id, f"versions/{_number(version)}.parquet")
+        path = self._path(data_id, f"versions/{_number(version, 13)}.parquet")
         try:
             # Seekable range reads let revision-zero lookups read the footer
             # without downloading or decoding the entire table.
@@ -66,7 +66,7 @@ class ObjectStoreDataCache(DataCache):
 
     def _record(self, revision_id):
         data_id, version, count = revision_id
-        path = self._path(data_id, f"revisions/{_number(version)}/{_number(count)}.json")
+        path = self._path(data_id, f"revisions/{_number(version, 13)}/{_number(count, 5)}.json")
         try:
             raw = self._read(path, revision_id)
         except KeyError:
@@ -92,7 +92,7 @@ class ObjectStoreDataCache(DataCache):
         except KeyError:
             return False
 
-    def _head(self, data_id, name, first, exists, *, rebuild=False):
+    def _head(self, data_id, name, first, exists, *, maximum, rebuild=False):
         path = self._path(data_id, name)
         hint = None
         if not rebuild:
@@ -100,7 +100,7 @@ class ObjectStoreDataCache(DataCache):
                 hint = json.loads(bytes(self._read(path, data_id)))
             except (KeyError, ValueError):
                 pass
-        if type(hint) is not int or not first <= hint < 10**20 or not exists(hint):
+        if type(hint) is not int or not first <= hint <= maximum or not exists(hint):
             candidate = first
             if not exists(candidate):
                 raise KeyError(data_id)
@@ -109,7 +109,7 @@ class ObjectStoreDataCache(DataCache):
         # Contiguous publication numbers let readers recover without a listing.
         # A concurrent writer can make this hint stale immediately; publication
         # records, rather than the pointer, remain the authority on every read.
-        while candidate < 10**20 - 1 and exists(candidate + 1):
+        while candidate < maximum and exists(candidate + 1):
             candidate += 1
         if rebuild or type(hint) is not int or hint != candidate:
             obstore.put(self._store, path, str(candidate).encode())
@@ -117,7 +117,8 @@ class ObjectStoreDataCache(DataCache):
 
     def _latest_version(self, data_id, *, rebuild=False):
         return self._head(data_id, "latest_version.json", 1,
-                          lambda version: self._exists((data_id, version, 0)), rebuild=rebuild)
+                          lambda version: self._exists((data_id, version, 0)),
+                          maximum=MAX_DATA_VERSION, rebuild=rebuild)
 
     def load_latest(self, data_id: DataId) -> DataRevisionId:
         return self.load_latest_revision((data_id, self._latest_version(data_id)))
@@ -128,8 +129,9 @@ class ObjectStoreDataCache(DataCache):
     def _revision_head(self, version_id, *, rebuild=False):
         data_id, version = version_id
         try:
-            count = self._head(data_id, f"revisions/{_number(version)}/latest.json", 0,
-                               lambda count: self._exists((data_id, version, count)), rebuild=rebuild)
+            count = self._head(data_id, f"revisions/{_number(version, 13)}/latest.json", 0,
+                               lambda count: self._exists((data_id, version, count)),
+                               maximum=MAX_DATA_REVISION_COUNT, rebuild=rebuild)
         except KeyError as error:
             raise KeyError(version_id) from error
         return data_id, version, count
@@ -152,7 +154,7 @@ class ObjectStoreDataCache(DataCache):
                       details: DataRevisionDetails) -> None:
         data_id, version = version_id
         _validate_dependency_names(details.dependencies, details.weak_dependencies)
-        path = self._path(data_id, f"versions/{_number(version)}.parquet")
+        path = self._path(data_id, f"versions/{_number(version, 13)}.parquet")
         sink = pa.BufferOutputStream()
         with pq.ParquetWriter(sink, data.schema, compression="zstd",
                               use_compliant_nested_type=False) as writer:
@@ -177,7 +179,7 @@ class ObjectStoreDataCache(DataCache):
     def write_revision(self, revision_id: DataRevisionId, details: DataRevisionDetails) -> None:
         _validate_dependency_names(details.dependencies, details.weak_dependencies)
         data_id, version, count = revision_id
-        _number(count)
+        _number(count, 5)
         if count <= 0:
             raise ValueError("Publish revision zero with its table using write_version")
         self._record((data_id, version, count - 1))
@@ -185,7 +187,7 @@ class ObjectStoreDataCache(DataCache):
 
     def _put_revision(self, revision_id, details):
         data_id, version, count = revision_id
-        obstore.put(self._store, self._path(data_id, f"revisions/{_number(version)}/{_number(count)}.json"),
+        obstore.put(self._store, self._path(data_id, f"revisions/{_number(version, 13)}/{_number(count, 5)}.json"),
                     _encode_revision(details).encode(), mode="create")
 
     def write_latest_version(self, version_id: DataVersionId) -> None:
@@ -194,7 +196,7 @@ class ObjectStoreDataCache(DataCache):
 
     def write_latest_revision(self, revision_id: DataRevisionId) -> None:
         data_id, version, count = revision_id
-        obstore.put(self._store, self._path(data_id, f"revisions/{_number(version)}/latest.json"), str(count).encode())
+        obstore.put(self._store, self._path(data_id, f"revisions/{_number(version, 13)}/latest.json"), str(count).encode())
 
     def recover(self, data_id: DataId) -> tuple[DataUpdateDetails, ...]:
         """Rebuild hints and return each version's head for notification delivery.
@@ -206,7 +208,7 @@ class ObjectStoreDataCache(DataCache):
         latest_version = self._latest_version(data_id, rebuild=True)
         updates = []
         for version in range(1, latest_version + 1):
-            path = self._path(data_id, f"revisions/{_number(version)}/{_number(0)}.json")
+            path = self._path(data_id, f"revisions/{_number(version, 13)}/{_number(0, 5)}.json")
             try:
                 self._read(path, (data_id, version, 0))
             except KeyError:
@@ -245,10 +247,10 @@ class _ParquetReader(io.RawIOBase):
         super().close()
 
 
-def _number(value: int) -> str:
-    if type(value) is not int or not 0 <= value < 10**20:
-        raise ValueError("Storage numbers must be integers between 0 and 10**20 - 1")
-    return f"{value:020d}"
+def _number(value: int, digits: int) -> str:
+    if type(value) is not int or not 0 <= value < 10**digits:
+        raise ValueError(f"Storage number must be a nonnegative integer fitting {digits} digits")
+    return f"{value:0{digits}d}"
 
 
 def _encode_revision(details: DataRevisionDetails) -> str:

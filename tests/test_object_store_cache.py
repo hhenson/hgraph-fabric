@@ -140,9 +140,9 @@ class StorageContract:
         paths = {item["path"] for item in obstore.list(self.store()).collect()}
         prefix = "market-data/equities/us/prices.close"
         self.assertEqual(paths, {
-            f"{prefix}/versions/00000000000000000001.parquet",
-            f"{prefix}/revisions/00000000000000000001/00000000000000000000.json",
-            f"{prefix}/revisions/00000000000000000001/latest.json", f"{prefix}/latest_version.json",
+            f"{prefix}/versions/0000000000001.parquet",
+            f"{prefix}/revisions/0000000000001/00000.json",
+            f"{prefix}/revisions/0000000000001/latest.json", f"{prefix}/latest_version.json",
         })
 
     def test_version_and_revision_names_sort_numerically(self):
@@ -154,11 +154,11 @@ class StorageContract:
         paths = sorted(item["path"] for item in obstore.list(writer._store).collect())
         versions = [path.rsplit("/", 1)[1] for path in paths if path.endswith(".parquet")]
         revisions = [path.rsplit("/", 1)[1] for path in paths
-                     if "/revisions/00000000000000000001/" in path and not path.endswith("latest.json")]
-        expected = [f"{number:020d}" for number in range(1, 13)]
+                     if "/revisions/0000000000001/" in path and not path.endswith("latest.json")]
+        expected = [f"{number:013d}" for number in range(1, 13)]
         self.assertEqual(versions, [f"{number}.parquet" for number in expected])
-        self.assertEqual(revisions, ["00000000000000000000.json", *[f"{number}.json" for number in expected]])
-        self.assertIn("test/prices/revisions/00000000000000000010/latest.json", paths)
+        self.assertEqual(revisions, [f"{number:05d}.json" for number in range(13)])
+        self.assertIn("test/prices/revisions/0000000000010/latest.json", paths)
         fresh = self.cache()
         self.assertEqual(fresh.load_latest("prices"), ("prices", 12, 0))
         self.assertEqual(fresh.load_latest_revision(("prices", 1)), ("prices", 1, 12))
@@ -169,17 +169,71 @@ class StorageContract:
         })
         writer = self.cache()
         table, update = writer.write(data, id="prices", dependencies=(("source", 1),), as_of=AS_OF)
-        path = "test/prices/versions/00000000000000000001.parquet"
+        path = "test/prices/versions/0000000000001.parquet"
         raw = bytes(obstore.get(writer._store, path).bytes())
         self.assertEqual(raw[:4], b"PAR1")
         parquet = pq.ParquetFile(pa.BufferReader(raw))
         self.assertEqual(parquet.metadata.row_group(0).column(0).compression, "ZSTD")
         initial = json.loads(parquet.metadata.metadata[b"hgraph_fabric.revision_zero"])
         self.assertEqual(initial["dependencies"], [["source", 1]])
-        json_path = "test/prices/revisions/00000000000000000001/00000000000000000000.json"
+        json_path = "test/prices/revisions/0000000000001/00000.json"
         self.assertEqual(json.loads(bytes(obstore.get(writer._store, json_path).bytes())), initial)
         self.assertTrue(self.cache().load_version(("prices", 1)).equals(table, check_metadata=True))
         self.assertEqual(self.cache().load_revision(("prices", 1, 0)).as_of, update.as_of)
+
+    def test_revision_rollover_persists_new_zero_and_advances_subscriber(self):
+        writer = self.cache()
+        original, _ = self.publish(writer)
+        # Seed only the boundary records; earlier revisions are not traversed.
+        writer._put_revision(("prices", 1, 99998), DataRevisionDetails((), (), AS_OF))
+        writer.write_latest_revision(("prices", 1, 99998))
+        writer = self.cache()
+        _, last = writer.write_dependencies("prices", weak_dependencies=(("audit", 1),), as_of=AS_OF)
+        self.assertEqual(last.revision, (1, 99999))
+        consumer = DataFabricSession(self.cache())
+        consumer.add_subscription("prices")
+        self.assertTrue(consumer.get_consistent_cut()["prices"].equals(original, check_metadata=True))
+        transport = Mock(spec=DataFabricTransport)
+        publisher = PollingDataFabricSession(self.cache(), transport)
+        _, unchanged = publisher.publish(id="prices", weak_dependencies=(("audit", 1),))
+        self.assertEqual(unchanged.revision, (1, 99999))
+        transport.send.assert_not_called()
+        newer_as_of = AS_OF + timedelta(days=1)
+        data, update = publisher.publish(id="prices", weak_dependencies=(("audit", 2),), as_of=newer_as_of)
+        self.assertEqual(update.revision, (2, 0))
+        transport.send.assert_called_once_with(update)
+        self.assertTrue(data.equals(original))
+        changes = consumer.apply_update(update)
+        self.assertEqual(set(changes), {"prices"})
+        self.assertTrue(changes["prices"].equals(data, check_metadata=True))
+        fresh = self.cache()
+        self.assertEqual(list(fresh.version_history("prices")), [("prices", 2, 0), ("prices", 1, 99999)])
+        self.assertEqual(fresh.load_revision(("prices", 2, 0)), DataRevisionDetails((), (("audit", 2),), newer_as_of))
+        self.assertEqual(fresh.load_revision(("prices", 1, 99999)).weak_dependencies, (("audit", 1),))
+        paths = {item["path"] for item in obstore.list(writer._store).collect()}
+        self.assertIn("test/prices/revisions/0000000000001/99999.json", paths)
+        self.assertIn("test/prices/revisions/0000000000002/00000.json", paths)
+        self.assertIn("test/prices/versions/0000000000002.parquet", paths)
+
+    def test_competing_rollovers_cannot_overwrite_new_version_or_revision_zero(self):
+        setup = self.cache()
+        self.publish(setup)
+        setup._put_revision(("prices", 1, 99999), DataRevisionDetails((), (), AS_OF))
+        setup.write_latest_revision(("prices", 1, 99999))
+        first, second = self.cache(), self.cache()
+        persist = first.write_version
+        def interleave(*args, **kwargs):
+            second.write_dependencies("prices", weak_dependencies=(("winner", 1),))
+            persist(*args, **kwargs)
+        with patch.object(first, "write_version", side_effect=interleave), patch.object(
+                first, "_put_initial_revision", wraps=first._put_initial_revision) as initial:
+            with self.assertRaises(obstore.exceptions.AlreadyExistsError):
+                first.write_dependencies("prices", weak_dependencies=(("loser", 1),))
+        initial.assert_not_called()
+        fresh = self.cache()
+        self.assertEqual(fresh.load_latest("prices"), ("prices", 2, 0))
+        self.assertEqual(fresh.load_revision(("prices", 2, 0)).weak_dependencies, (("winner", 1),))
+        self.assertEqual(fresh.load_latest_revision(("prices", 1)), ("prices", 1, 99999))
 
     def test_revision_zero_reads_metadata_without_downloading_table(self):
         writer = self.cache()
@@ -188,8 +242,8 @@ class StorageContract:
         # for a publisher interrupted between the table and JSON writes.
         with patch("obstore.open_reader", side_effect=AssertionError("Unnecessary footer read")):
             self.assertEqual(self.cache().load_revision(("prices", 1, 0)).as_of, AS_OF)
-        obstore.delete(writer._store, "test/prices/revisions/00000000000000000001/00000000000000000000.json")
-        path = "test/prices/versions/00000000000000000001.parquet"
+        obstore.delete(writer._store, "test/prices/revisions/0000000000001/00000.json")
+        path = "test/prices/versions/0000000000001.parquet"
         size = obstore.head(writer._store, path)["size"]
         open_reader = obstore.open_reader
         bytes_read = 0
@@ -219,10 +273,16 @@ class StorageContract:
                 with self.assertRaises(ValueError):
                     writer.write_revision(("prices", 1, number), details)
                 put.assert_not_called()
+        with patch("obstore.put") as put:
+            with self.assertRaises(ValueError):
+                writer.write_version(("prices", 10**13), pa.table({"x": [1]}), details)
+            with self.assertRaises(ValueError):
+                writer.write_revision(("prices", 1, 100000), details)
+            put.assert_not_called()
 
     def test_corrupt_or_missing_initial_metadata_is_not_a_missing_version(self):
         writer = self.cache()
-        path = "test/prices/versions/00000000000000000001.parquet"
+        path = "test/prices/versions/0000000000001.parquet"
         for record in (None, "null", "{}", "not json"):
             with self.subTest(record=record):
                 sink = pa.BufferOutputStream()
@@ -333,7 +393,7 @@ class StorageContract:
         self.publish(writer)
         writer.write_dependencies("prices", (("source", 1),))
         for payload in (None, b"not json", b'"1"', b"true", b"0", b"1", b"999"):
-            for name, expected in (("latest_version.json", b"2"), ("revisions/00000000000000000002/latest.json", b"1")):
+            for name, expected in (("latest_version.json", b"2"), ("revisions/0000000000002/latest.json", b"1")):
                 with self.subTest(payload=payload, name=name):
                     path = writer._path("prices", name)
                     if payload is None:
@@ -347,7 +407,7 @@ class StorageContract:
         writer = self.cache()
         self.publish(writer)
         writer.write_dependencies("prices", (("source", 1),))
-        path = writer._path("prices", "revisions/00000000000000000001/00000000000000000001.json")
+        path = writer._path("prices", "revisions/0000000000001/00001.json")
         for payload in (b"not json", b"{}", b"null"):
             obstore.put(writer._store, path, payload)
             with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, "Invalid stored publication"):
@@ -513,9 +573,9 @@ class StorageContract:
             with self.assertRaises(OSError):
                 writer.write(pa.table({"price": [123]}), id="prices",
                              dependencies=(("source", 1),), weak_dependencies=(("audit", 2),), as_of=AS_OF)
-        path = "test/prices/revisions/00000000000000000001/00000000000000000000.json"
+        path = "test/prices/revisions/0000000000001/00000.json"
         self.assertEqual({item["path"] for item in obstore.list(writer._store).collect()}, {
-            "test/prices/versions/00000000000000000001.parquet",
+            "test/prices/versions/0000000000001.parquet",
         })
         reader = self.cache()
         initial = reader.load_revision(("prices", 1, 0))
@@ -547,7 +607,7 @@ class StorageContract:
         self.publish(writer, dependencies=(("source", 1),))
         writer.write_dependencies("prices", dependencies=(("source", 2),))
         self.publish(writer, dependencies=(("source", 3),))
-        path = "test/prices/revisions/00000000000000000001/00000000000000000000.json"
+        path = "test/prices/revisions/0000000000001/00000.json"
         obstore.delete(writer._store, path)
         reader = self.cache()
         self.assertEqual([u.revision for u in reader.recover("prices")], [(1, 1), (2, 0)])

@@ -232,9 +232,15 @@ metadata. These keywords also pass through session publishing and the worker's
 publish callable. They are rejected when supplying a new table.
 Supply the complete strong and weak dependency tuples; omitted tuples are empty.
 Changed dependencies increment the revision count and persist only the revision and
-its per-version head. Unchanged tuples return the existing `(Table, DataUpdateDetails)`
-without writes, even when `as_of` differs. The table retains its original version
-metadata; the new revision's `as_of` is recorded in the update details. An unknown
+its per-version head. After revision `99999`, changed dependencies publish the
+selected table under the next dataset version with the new revision data at
+revision `00000`. The new table's metadata uses that version and the update's
+`as_of`; the old version and its revisions are retained. This also applies when
+revising an older version: allocation uses the dataset's latest version, while
+the table comes from the selected version.
+Unchanged tuples return the existing `(Table, DataUpdateDetails)`
+without writes, even when `as_of` differs. Within a version, the table retains its
+original metadata; the new revision's `as_of` is recorded in the update details. An unknown
 ID raises `KeyError`. Supplying a table always creates a new version, without a
 table equality check.
 
@@ -273,16 +279,17 @@ Parquet footer. Timestamps use ISO format and nullable dependency tuples remain
 distinct from empty tuples. Namespaces and IDs appear verbatim in readable paths:
 
 ```text
-market-data/equities/us/prices.close/versions/00000000000000000001.parquet
-market-data/equities/us/prices.close/revisions/00000000000000000001/00000000000000000000.json
-market-data/equities/us/prices.close/revisions/00000000000000000001/00000000000000000001.json
-market-data/equities/us/prices.close/revisions/00000000000000000001/latest.json
+market-data/equities/us/prices.close/versions/0000000000001.parquet
+market-data/equities/us/prices.close/revisions/0000000000001/00000.json
+market-data/equities/us/prices.close/revisions/0000000000001/00001.json
+market-data/equities/us/prices.close/revisions/0000000000001/latest.json
 market-data/equities/us/prices.close/latest_version.json
 ```
 
-Version directories, version filenames and revision filenames use 20-digit,
-zero-padded decimal numbers so lexicographic sorting follows numeric order.
-The storage format accepts numbers below `10**20`. Numbers in table metadata,
+Version names use 13-digit zero-padded decimal numbers; revision counts use
+5 digits. Lexicographic sorting follows numeric order. Versions are bounded by
+`9999999999999`; revision `99999` rolls over as described above when dependencies
+change again. Numbers in table metadata,
 revision records and latest pointers remain ordinary unpadded numbers.
 
 Namespaces support `/`-separated segments, such as `market-data/equities/us`.

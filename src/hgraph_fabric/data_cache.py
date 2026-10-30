@@ -10,6 +10,8 @@ from .data_structures import (
     DataRevisionId,
     DataUpdateDetails,
     DataVersionId,
+    MAX_DATA_VERSION,
+    MAX_DATA_REVISION_COUNT,
 )
 
 
@@ -106,6 +108,8 @@ class DataCache(ABC):
                      if b"as_of" in metadata else datetime.now(UTC))
         previous = self._publication_head(id)
         version = 1 if previous is None else previous[1] + 1
+        if version > MAX_DATA_VERSION:
+            raise ValueError("The dataset has exhausted its 13-digit version numbers")
 
         metadata.update({
             b"id": id.encode("utf-8"),
@@ -148,8 +152,9 @@ class DataCache(ABC):
         version defaults to latest at the start of the attempt. An optional
         expected_revision count rejects a computation based on stale metadata.
 
-        An as_of-only change is a no-op. The returned table keeps the metadata
-        from its version publication; the revision timestamp is in the update.
+        An as_of-only change is a no-op. After revision 99999, changed dependencies
+        publish this table under the next dataset version at revision zero.
+        Otherwise the table keeps its version metadata; the timestamp is in the update.
         """
         previous = (self._publication_head(id) if version is None else
                     self.load_latest_revision((id, version)))
@@ -165,11 +170,15 @@ class DataCache(ABC):
                    or weak_dependencies != details.weak_dependencies)
         revision_id = previous
         if changed:
-            revision_id = (id, previous[1], previous[2] + 1)
             details = DataRevisionDetails(
                 dependencies=dependencies, weak_dependencies=weak_dependencies,
                 as_of=as_of if as_of is not None else datetime.now(UTC),
             )
+            if previous[2] == MAX_DATA_REVISION_COUNT:
+                # Reuse the selected table, even when revising an older version.
+                # Normal publication allocates from the dataset's stored latest.
+                return self.write(data, id, dependencies, weak_dependencies, details.as_of)
+            revision_id = (id, previous[1], previous[2] + 1)
             self.write_revision(revision_id, details)
             self.write_latest_revision(revision_id)
         update = DataUpdateDetails(
