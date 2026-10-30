@@ -139,11 +139,11 @@ class ObjectStoreDataCache(DataCache):
             reader = pq.ParquetFile(source)
             _decode_revision(reader.metadata.metadata.get(b"hgraph_fabric.revision_zero"), (*version_id, 0))
             # Parquet exposes the publication footer key as schema metadata.
-            # Restore the original Arrow metadata, including any user key with
-            # the same name, from Parquet's separately stored Arrow schema.
+            # Restore the original schema, including temporal types normalized
+            # by Parquet and any user metadata key with the same name.
             schema = pa.ipc.read_schema(pa.BufferReader(
                 base64.b64decode(reader.metadata.metadata[b"ARROW:schema"])))
-            return reader.read().replace_schema_metadata(schema.metadata)
+            return reader.read().cast(schema)
 
     def load_revision(self, revision_id: DataRevisionId) -> DataRevisionDetails:
         return self._record(revision_id)[1]

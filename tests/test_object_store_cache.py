@@ -58,6 +58,23 @@ class StorageContract:
                 loaded = self.cache().get_version((str(index), update.revision[0]))
                 self.assertTrue(loaded.equals(table, check_metadata=True))
 
+    def test_parquet_normalized_temporal_types_restore_original_schema(self):
+        schema = pa.schema([
+            pa.field("date", pa.date64(), metadata={b"field": b"date"}),
+            pa.field("time", pa.time32("s")),
+            pa.field("timestamp", pa.timestamp("s", tz="UTC")),
+        ], metadata={b"custom": b"temporal"})
+        data = pa.Table.from_arrays([
+            pa.array([0, 86400000, None], type=pa.date64()),
+            pa.array([0, 60, None], type=pa.time32("s")),
+            pa.array([0, 1, None], type=pa.timestamp("s", tz="UTC")),
+        ], schema=schema)
+        writer = self.cache()
+        written, _ = writer.write(data, id="prices", as_of=AS_OF)
+        loaded = self.cache().get_version(("prices", 1))
+        self.assertTrue(loaded.schema.equals(written.schema, check_metadata=True))
+        self.assertTrue(loaded.equals(writer.get_version(("prices", 1)), check_metadata=True))
+
     def test_no_data_selection_then_first_publication_uses_shared_store(self):
         reader, writer = self.cache(), self.cache()
         session = DataFabricSession(reader)
