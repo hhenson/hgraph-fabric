@@ -232,9 +232,15 @@ metadata. These keywords also pass through session publishing and the worker's
 publish callable. They are rejected when supplying a new table.
 Supply the complete strong and weak dependency tuples; omitted tuples are empty.
 Changed dependencies increment the revision count and persist only the revision and
-its per-version head. Unchanged tuples return the existing `(Table, DataUpdateDetails)`
-without writes, even when `as_of` differs. The table retains its original version
-metadata; the new revision's `as_of` is recorded in the update details. An unknown
+its per-version head. After revision `99999`, changed dependencies publish the
+selected table under the next dataset version with the new revision data at
+revision `00000`. The new table's metadata uses that version and the update's
+`as_of`; the old version and its revisions are retained. This also applies when
+revising an older version: allocation uses the dataset's latest version, while
+the table comes from the selected version.
+Unchanged tuples return the existing `(Table, DataUpdateDetails)`
+without writes, even when `as_of` differs. Within a version, the table retains its
+original metadata; the new revision's `as_of` is recorded in the update details. An unknown
 ID raises `KeyError`. Supplying a table always creates a new version, without a
 table equality check.
 
@@ -266,17 +272,25 @@ readers; construct new filesystem/S3 stores pointing at the same location for
 independent readers. Pass any of these caches directly to `DataFabricSession`
 or `fabric_service`.
 
-Tables are stored as Arrow IPC files, preserving schema and field metadata.
-Revisions and latest pointers are JSON; timestamps use ISO format and nullable
-dependency tuples remain distinct from empty tuples. Namespaces and IDs appear
-verbatim in readable paths, for example:
+Tables are stored as Zstandard-compressed Parquet files. The cache returns
+Arrow tables with their schema and field metadata. All revisions and latest
+pointers are readable JSON files. Revision zero is also stored as JSON in the
+Parquet footer. Timestamps use ISO format and nullable dependency tuples remain
+distinct from empty tuples. Namespaces and IDs appear verbatim in readable paths:
 
 ```text
-market-data/equities/us/prices.close/versions/1/<payload-uuid>.arrow
-market-data/equities/us/prices.close/revisions/1/0.json
-market-data/equities/us/prices.close/revisions/1/latest.json
+market-data/equities/us/prices.close/versions/0000000000001.parquet
+market-data/equities/us/prices.close/revisions/0000000000001/00000.json
+market-data/equities/us/prices.close/revisions/0000000000001/00001.json
+market-data/equities/us/prices.close/revisions/0000000000001/latest.json
 market-data/equities/us/prices.close/latest_version.json
 ```
+
+Version names use 13-digit zero-padded decimal numbers; revision counts use
+5 digits. Lexicographic sorting follows numeric order. Versions are bounded by
+`9999999999999`; revision `99999` rolls over as described above when dependencies
+change again. Numbers in table metadata,
+revision records and latest pointers remain ordinary unpadded numbers.
 
 Namespaces support `/`-separated segments, such as `market-data/equities/us`.
 Leading, trailing or repeated separators and `.` or `..` segments are rejected.
@@ -289,13 +303,17 @@ starting and ending with a letter or digit. Windows device names such as `con`,
 case-insensitive filesystems. Invalid names raise `ValueError` before storage
 access; names are never escaped or silently normalised.
 
-For a new table, the writer uploads an Arrow payload under a unique name, then
-atomically creates revision zero containing the payload reference and revision
-metadata. That single create commits the publication. Writers competing for the
-same version cannot combine one writer's table with another's dependencies.
-An interrupted upload or a failed revision-zero create can leave an unreferenced
-payload; it does not occupy a version number or block the next writer. Removing
-those orphan payloads is separate maintenance.
+For a new table, the writer includes revision zero in the Parquet footer under
+`hgraph_fabric.revision_zero`, then atomically creates the version file. This
+single create saves both the table and its initial dependencies. Only the writer
+that successfully creates the version file proceeds to write the revision-zero
+JSON file and latest pointers. A losing writer never writes revision zero.
+A failure before the create leaves the version available; a completed create
+can be recovered even if its acknowledgement or later writes are lost.
+Revision-zero lookups use the JSON file, falling back to the Parquet footer if
+that file is missing. Footer reads do not decode the table. The cache restores
+user schema metadata separately from the publication metadata when returning
+a table.
 
 Dependency-only writes atomically create the next revision in the selected
 version. Two writers choosing the same revision or version fail on the duplicate
@@ -311,7 +329,8 @@ immutable and authoritative. A delayed pointer write cannot hide committed
 successors from a fresh lookup. Missing or corrupt publication records are not
 repairable from pointers; retained contiguous history is required.
 
-`cache.recover(id)` scans from the first publication, rebuilds both kinds of
+`cache.recover(id)` scans from the first publication, restores missing
+revision-zero JSON files from their Parquet footers, rebuilds both kinds of
 pointer, and returns a tuple of `DataUpdateDetails`, one for each version's latest
 revision. Deliver these to the associated managers and send them through the
 transport to cover notifications lost after a commit. Duplicate delivery is safe.

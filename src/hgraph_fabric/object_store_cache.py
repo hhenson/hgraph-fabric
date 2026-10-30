@@ -2,25 +2,27 @@
 
 from dataclasses import asdict
 from datetime import datetime
+import base64
+import io
 import json
 import re
-from uuid import uuid4
 
 import obstore
 from obstore.store import ObjectStore
 import pyarrow as pa
+import pyarrow.parquet as pq
 
 from .data_cache import DataCache
 from .data_structures import (
     DataId, DataNamespace, DataRevisionDetails, DataRevisionId,
-    DataUpdateDetails, DataVersionId,
+    DataUpdateDetails, DataVersionId, MAX_DATA_VERSION, MAX_DATA_REVISION_COUNT,
 )
 
 
 class ObjectStoreDataCache(DataCache):
     """Immutable publications with independently recoverable head pointers.
 
-    Revision zero commits a version by naming its already-stored Arrow payload.
+    A Parquet file atomically commits the table and revision-zero metadata.
     Later revisions commit independently, including on older versions. Competing
     writers fail if they try to create the same publication. Head pointers are
     hints: reads check for subsequent publications and repair stale pointers.
@@ -40,6 +42,16 @@ class ObjectStoreDataCache(DataCache):
         except FileNotFoundError as error:
             raise KeyError(key) from error
 
+    def _open_version(self, version_id, key):
+        data_id, version = version_id
+        path = self._path(data_id, f"versions/{_number(version, 13)}.parquet")
+        try:
+            # Seekable range reads let revision-zero lookups read the footer
+            # without downloading or decoding the entire table.
+            return _ParquetReader(obstore.open_reader(self._store, path, buffer_size=0))
+        except FileNotFoundError as error:
+            raise KeyError(key) from error
+
     def write(self, data=None, id=None, dependencies=(), weak_dependencies=(), as_of=None,
               *, version=None, expected_revision=None):
         _validate_dependency_names(dependencies, weak_dependencies)
@@ -54,19 +66,24 @@ class ObjectStoreDataCache(DataCache):
 
     def _record(self, revision_id):
         data_id, version, count = revision_id
-        raw = self._read(self._path(data_id, f"revisions/{version}/{count}.json"), revision_id)
+        path = self._path(data_id, f"revisions/{_number(version, 13)}/{_number(count, 5)}.json")
         try:
-            value = json.loads(bytes(raw))
-            details = DataRevisionDetails(
-                dependencies=_dependencies(value["dependencies"]),
-                weak_dependencies=_dependencies(value["weak_dependencies"]),
-                as_of=datetime.fromisoformat(value["as_of"]),
-            )
-            if count == 0 and re.fullmatch(r"[0-9a-f]{32}", value["payload"]) is None:
-                raise ValueError("Invalid payload reference")
-        except (KeyError, TypeError, ValueError) as error:
-            raise ValueError(f"Invalid stored publication {revision_id!r}") from error
-        return value, details
+            raw = self._read(path, revision_id)
+        except KeyError:
+            if count != 0:
+                raise
+            return self._initial_record((data_id, version))
+        return _decode_revision(raw, revision_id)
+
+    def _initial_record(self, version_id):
+        revision_id = (*version_id, 0)
+        with self._open_version(version_id, revision_id) as source:
+            try:
+                metadata = pq.read_metadata(source).metadata
+                raw = metadata[b"hgraph_fabric.revision_zero"]
+            except (KeyError, TypeError, pa.ArrowInvalid) as error:
+                raise ValueError(f"Invalid stored publication {revision_id!r}") from error
+        return _decode_revision(raw, revision_id)
 
     def _exists(self, revision_id):
         try:
@@ -75,7 +92,7 @@ class ObjectStoreDataCache(DataCache):
         except KeyError:
             return False
 
-    def _head(self, data_id, name, first, exists, *, rebuild=False):
+    def _head(self, data_id, name, first, exists, *, maximum, rebuild=False):
         path = self._path(data_id, name)
         hint = None
         if not rebuild:
@@ -83,7 +100,7 @@ class ObjectStoreDataCache(DataCache):
                 hint = json.loads(bytes(self._read(path, data_id)))
             except (KeyError, ValueError):
                 pass
-        if type(hint) is not int or hint < first or not exists(hint):
+        if type(hint) is not int or not first <= hint <= maximum or not exists(hint):
             candidate = first
             if not exists(candidate):
                 raise KeyError(data_id)
@@ -92,7 +109,7 @@ class ObjectStoreDataCache(DataCache):
         # Contiguous publication numbers let readers recover without a listing.
         # A concurrent writer can make this hint stale immediately; publication
         # records, rather than the pointer, remain the authority on every read.
-        while exists(candidate + 1):
+        while candidate < maximum and exists(candidate + 1):
             candidate += 1
         if rebuild or type(hint) is not int or hint != candidate:
             obstore.put(self._store, path, str(candidate).encode())
@@ -100,7 +117,8 @@ class ObjectStoreDataCache(DataCache):
 
     def _latest_version(self, data_id, *, rebuild=False):
         return self._head(data_id, "latest_version.json", 1,
-                          lambda version: self._exists((data_id, version, 0)), rebuild=rebuild)
+                          lambda version: self._exists((data_id, version, 0)),
+                          maximum=MAX_DATA_VERSION, rebuild=rebuild)
 
     def load_latest(self, data_id: DataId) -> DataRevisionId:
         return self.load_latest_revision((data_id, self._latest_version(data_id)))
@@ -111,21 +129,23 @@ class ObjectStoreDataCache(DataCache):
     def _revision_head(self, version_id, *, rebuild=False):
         data_id, version = version_id
         try:
-            count = self._head(data_id, f"revisions/{version}/latest.json", 0,
-                               lambda count: self._exists((data_id, version, count)), rebuild=rebuild)
+            count = self._head(data_id, f"revisions/{_number(version, 13)}/latest.json", 0,
+                               lambda count: self._exists((data_id, version, count)),
+                               maximum=MAX_DATA_REVISION_COUNT, rebuild=rebuild)
         except KeyError as error:
             raise KeyError(version_id) from error
         return data_id, version, count
 
     def load_version(self, version_id: DataVersionId) -> pa.Table:
-        data_id, version = version_id
-        try:
-            value, _ = self._record((*version_id, 0))
-        except KeyError as error:
-            raise KeyError(version_id) from error
-        data = self._read(self._path(data_id, f"versions/{version}/{value['payload']}.arrow"), version_id)
-        with pa.ipc.open_file(pa.BufferReader(data)) as reader:
-            return reader.read_all()
+        with self._open_version(version_id, version_id) as source:
+            reader = pq.ParquetFile(source)
+            _decode_revision(reader.metadata.metadata.get(b"hgraph_fabric.revision_zero"), (*version_id, 0))
+            # Parquet exposes the publication footer key as schema metadata.
+            # Restore the original schema, including temporal types normalized
+            # by Parquet and any user metadata key with the same name.
+            schema = pa.ipc.read_schema(pa.BufferReader(
+                base64.b64decode(reader.metadata.metadata[b"ARROW:schema"])))
+            return reader.read().cast(schema)
 
     def load_revision(self, revision_id: DataRevisionId) -> DataRevisionDetails:
         return self._record(revision_id)[1]
@@ -134,31 +154,41 @@ class ObjectStoreDataCache(DataCache):
                       details: DataRevisionDetails) -> None:
         data_id, version = version_id
         _validate_dependency_names(details.dependencies, details.weak_dependencies)
-        token = uuid4().hex
-        path = self._path(data_id, f"versions/{version}/{token}.arrow")
+        path = self._path(data_id, f"versions/{_number(version, 13)}.parquet")
         sink = pa.BufferOutputStream()
-        with pa.ipc.new_file(sink, data.schema) as writer:
+        with pq.ParquetWriter(sink, data.schema, compression="zstd",
+                              use_compliant_nested_type=False) as writer:
+            writer.add_key_value_metadata({"hgraph_fabric.revision_zero": _encode_revision(details)})
             writer.write_table(data)
         payload = obstore.Bytes(memoryview(sink.getvalue()).cast("B"))
+        # Only the writer that creates the version proceeds to write its JSON
+        # record. The footer also retains that record if this writer stops here.
         obstore.put(self._store, path, payload, mode="create")
-        # This single create is the commit. Racing writers have distinct payloads;
-        # a loser or a crash before commit leaves an unreferenced payload only.
-        self._put_revision((*version_id, 0), details, payload=token)
+        self._put_initial_revision(version_id, details)
+
+    def _put_initial_revision(self, version_id, details):
+        revision_id = (*version_id, 0)
+        try:
+            self._put_revision(revision_id, details)
+        except obstore.exceptions.AlreadyExistsError:
+            # Recovery may have copied the footer while the winning publisher
+            # was paused. Accept that identical record without overwriting it.
+            if self._record(revision_id)[1] != details:
+                raise ValueError(f"Revision-zero copy differs from publication {revision_id!r}")
 
     def write_revision(self, revision_id: DataRevisionId, details: DataRevisionDetails) -> None:
         _validate_dependency_names(details.dependencies, details.weak_dependencies)
         data_id, version, count = revision_id
+        _number(count, 5)
         if count <= 0:
             raise ValueError("Publish revision zero with its table using write_version")
         self._record((data_id, version, count - 1))
         self._put_revision(revision_id, details)
 
-    def _put_revision(self, revision_id, details, **extra):
+    def _put_revision(self, revision_id, details):
         data_id, version, count = revision_id
-        value = asdict(details) | extra
-        value["as_of"] = details.as_of.isoformat()
-        obstore.put(self._store, self._path(data_id, f"revisions/{version}/{count}.json"),
-                    json.dumps(value, separators=(",", ":")).encode(), mode="create")
+        obstore.put(self._store, self._path(data_id, f"revisions/{_number(version, 13)}/{_number(count, 5)}.json"),
+                    _encode_revision(details).encode(), mode="create")
 
     def write_latest_version(self, version_id: DataVersionId) -> None:
         data_id, version = version_id
@@ -166,23 +196,81 @@ class ObjectStoreDataCache(DataCache):
 
     def write_latest_revision(self, revision_id: DataRevisionId) -> None:
         data_id, version, count = revision_id
-        obstore.put(self._store, self._path(data_id, f"revisions/{version}/latest.json"), str(count).encode())
+        obstore.put(self._store, self._path(data_id, f"revisions/{_number(version, 13)}/latest.json"), str(count).encode())
 
     def recover(self, data_id: DataId) -> tuple[DataUpdateDetails, ...]:
         """Rebuild hints and return each version's head for notification delivery.
 
-        Scan committed publications from version one, ignoring existing hints.
+        Restore missing revision-zero JSON files and rebuild hints from version one.
         Callers apply/send these updates to cover notifications lost after a
         commit. Recovery itself neither changes reader caches nor sends messages.
-        Unreferenced Arrow payloads are ignored and do not block future writes.
         """
         latest_version = self._latest_version(data_id, rebuild=True)
         updates = []
         for version in range(1, latest_version + 1):
+            path = self._path(data_id, f"revisions/{_number(version, 13)}/{_number(0, 5)}.json")
+            try:
+                self._read(path, (data_id, version, 0))
+            except KeyError:
+                _, initial = self._initial_record((data_id, version))
+                self._put_initial_revision((data_id, version), initial)
             revision_id = self._revision_head((data_id, version), rebuild=True)
             details = self.load_revision(revision_id)
             updates.append(DataUpdateDetails(id=data_id, revision=revision_id[1:], **asdict(details)))
         return tuple(updates)
+
+
+class _ParquetReader(io.RawIOBase):
+    """Supply Python's file lifecycle API around obstore's seekable reader."""
+
+    def __init__(self, source):
+        self._source = source
+
+    def readable(self):
+        return True
+
+    def seekable(self):
+        return True
+
+    def read(self, size=-1):
+        return bytes(self._source.read(size))
+
+    def seek(self, offset, whence=0):
+        return self._source.seek(offset, whence)
+
+    def tell(self):
+        return self._source.tell()
+
+    def close(self):
+        if not self.closed:
+            self._source.close()
+        super().close()
+
+
+def _number(value: int, digits: int) -> str:
+    if type(value) is not int or not 0 <= value < 10**digits:
+        raise ValueError(f"Storage number must be a nonnegative integer fitting {digits} digits")
+    return f"{value:0{digits}d}"
+
+
+def _encode_revision(details: DataRevisionDetails) -> str:
+    value = asdict(details)
+    value["as_of"] = details.as_of.isoformat()
+    return json.dumps(value, separators=(",", ":"))
+
+
+def _decode_revision(raw, revision_id):
+    try:
+        value = json.loads(bytes(raw))
+        details = DataRevisionDetails(
+            dependencies=_dependencies(value["dependencies"]),
+            weak_dependencies=_dependencies(value["weak_dependencies"]),
+            as_of=datetime.fromisoformat(value["as_of"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"Invalid stored publication {revision_id!r}") from error
+    return value, details
+
 
 def _validate_dependency_names(*groups):
     for dependencies in groups:

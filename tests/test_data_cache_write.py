@@ -11,6 +11,68 @@ from test_data_cache import MemoryDataCache
 
 
 class DataCacheWriteTests(unittest.TestCase):
+    def test_revision_limit_rolls_to_new_version_only_when_dependencies_change(self):
+        cache = MemoryDataCache()
+        as_of = datetime(2026, 10, 21, tzinfo=UTC)
+        original, _ = cache.write(table({"price": [10]}, metadata={b"custom": b"keep"}),
+                                  id="prices", as_of=as_of)
+        # Seed the boundary; this test only accesses the final history records.
+        cache.latest_values["prices"] = ("prices", 1, 99998)
+        cache.revision_values[("prices", 1, 99998)] = DataRevisionDetails((), (), as_of)
+        cache.writes.clear()
+        _, last = cache.write_dependencies("prices", (("source", 1),), as_of=as_of)
+        self.assertEqual(last.revision, (1, 99999))
+        self.assertEqual([write[0] for write in cache.writes], ["revision", "latest_revision"])
+        cache.writes.clear()
+        self.assertEqual(cache.write_dependencies("prices", (("source", 1),),
+                                                  as_of=as_of + timedelta(days=1))[1], last)
+        self.assertEqual(cache.writes, [])
+        next_as_of = as_of + timedelta(days=2)
+        with patch("hgraph_fabric.data_cache.datetime", wraps=datetime) as clock:
+            clock.now.return_value = next_as_of
+            data, update = cache.write_dependencies("prices", (("source", 2),), (("audit", 3),))
+        self.assertEqual(update.revision, (2, 0))
+        self.assertEqual(update.dependencies, (("source", 2),))
+        self.assertEqual(update.weak_dependencies, (("audit", 3),))
+        self.assertEqual(update.as_of, next_as_of)
+        self.assertTrue(data.equals(original))
+        self.assertEqual(data.schema.metadata, original.schema.metadata | {
+            b"version": b"2", b"as_of": next_as_of.isoformat().encode(),
+        })
+        self.assertEqual([write[0] for write in cache.writes], ["version", "latest_revision", "latest_version"])
+        self.assertEqual(cache.latest("prices"), ("prices", 2, 0))
+        self.assertEqual(cache.get_latest_revision(("prices", 1)), ("prices", 1, 99999))
+        self.assertEqual(cache.get_revision(("prices", 1, 99999)).dependencies, (("source", 1),))
+        self.assertIs(cache.get_version(("prices", 1)), original)
+
+    def test_rollover_of_older_version_carries_selected_table_to_next_dataset_version(self):
+        cache = MemoryDataCache()
+        old, _ = cache.write(table({"price": [10]}), id="prices")
+        cache.write(table({"price": [20]}), id="prices")
+        as_of = datetime(2026, 10, 21, tzinfo=UTC)
+        cache.revision_values[("prices", 1, 99999)] = DataRevisionDetails((), (), as_of)
+        cache.writes.clear()
+        with self.assertRaisesRegex(RuntimeError, "revision has changed"):
+            cache.write_dependencies("prices", (("source", 1),), version=1, expected_revision=99998)
+        self.assertEqual(cache.writes, [])
+        data, update = cache.write_dependencies("prices", (("source", 1),),
+                                                version=1, expected_revision=99999, as_of=as_of)
+        self.assertEqual(update.revision, (3, 0))
+        self.assertTrue(data.equals(old))
+        self.assertEqual(cache.get_version(("prices", 2))["price"].to_pylist(), [20])
+
+    def test_version_number_exhaustion_does_not_write(self):
+        cache = MemoryDataCache()
+        as_of = datetime(2026, 10, 21, tzinfo=UTC)
+        cache.latest_values["prices"] = ("prices", 9999999999999, 99999)
+        cache.data_values[("prices", 9999999999999)] = table({"price": [10]})
+        cache.revision_values[("prices", 9999999999999, 99999)] = DataRevisionDetails((), (), as_of)
+        with self.assertRaisesRegex(ValueError, "13-digit"):
+            cache.write(table({"price": [20]}), id="prices")
+        with self.assertRaisesRegex(ValueError, "13-digit"):
+            cache.write_dependencies("prices", (("source", 1),))
+        self.assertEqual(cache.writes, [])
+
     def test_revision_timestamp_is_readable_without_stored_table(self):
         writer = MemoryDataCache()
         as_of = datetime(2026, 10, 21, 12, 34, 56, 123456, tzinfo=UTC)
